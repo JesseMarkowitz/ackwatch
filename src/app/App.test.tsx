@@ -13,7 +13,7 @@ describe('foundation shell', () => {
     render(<App />);
 
     expect(screen.getByRole('heading', { name: /important messages/i })).toBeInTheDocument();
-    expect(screen.getByText(/browser session/i)).toBeInTheDocument();
+    expect(screen.getByText(/validates discovery/i)).toBeInTheDocument();
 
     await user.type(screen.getByLabelText(/matrix user id/i), '@operator:example.test');
     await user.click(screen.getByRole('button', { name: /continue/i }));

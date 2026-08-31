@@ -6,6 +6,7 @@
 - [ADR-0004: Session-only Matrix credentials](./0004-session-credentials.md)
 - [ADR-0005: Balanced preview privacy](./0005-preview-privacy.md)
 - [ADR-0006: Acknowledged deadline does not slide](./0006-acknowledged-deadline.md)
+- [ADR-0007: Matrix SDK and truthful coverage boundary](./0007-matrix-sdk-and-coverage.md)
 
 Records are accepted unless their own status says otherwise. Specification requirements remain
 normative when an ADR summarizes them.

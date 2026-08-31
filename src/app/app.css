@@ -149,6 +149,15 @@ button:disabled {
   opacity: 0.42;
 }
 
+.topbar__action {
+  justify-self: end;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.85rem;
+  color: var(--forest);
+  background: transparent;
+  font-size: 0.72rem;
+}
+
 .health-strip {
   display: grid;
   grid-template-columns: minmax(15rem, 1fr) minmax(32rem, 2.1fr);
@@ -173,6 +182,16 @@ button:disabled {
   margin: 0;
   font-size: 0.88rem;
   font-weight: 750;
+}
+
+.health-strip__server {
+  overflow: hidden;
+  margin: 0.25rem 0 0;
+  color: #6b7775;
+  font-family: 'JetBrains Mono Variable', monospace;
+  font-size: 0.58rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .health-grid {
@@ -258,6 +277,41 @@ button:disabled {
 
 .health-pill--warning .health-pill__dot {
   background: var(--coral);
+}
+
+.health-pill--danger {
+  color: #7d211b;
+  border-color: rgba(125, 33, 27, 0.35);
+  background: #f7cbc1;
+}
+
+.health-pill--danger .health-pill__dot {
+  background: #b5372d;
+}
+
+.fault-banner {
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid rgba(125, 33, 27, 0.35);
+  border-radius: 0.4rem;
+  color: #681e19;
+  background: #f7d8d0;
+  font-size: 0.75rem;
+}
+
+.fault-banner strong {
+  white-space: nowrap;
+}
+
+.fault-banner button {
+  min-height: 2.25rem;
+  margin-left: auto;
+  padding: 0.4rem 0.75rem;
+  white-space: nowrap;
+  font-size: 0.72rem;
 }
 
 .hero {
@@ -355,6 +409,16 @@ button:disabled {
   background: rgba(255, 255, 255, 0.65);
 }
 
+.connect-card > input[type='url'] {
+  width: 100%;
+  min-height: 2.7rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid rgba(23, 34, 35, 0.45);
+  border-radius: 0.35rem;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.65);
+}
+
 .field-row button {
   border-radius: 0 0.35rem 0.35rem 0;
 }
@@ -364,6 +428,40 @@ button:disabled {
   color: #5a6866;
   font-size: 0.69rem;
   line-height: 1.5;
+}
+
+.override-toggle {
+  display: flex !important;
+  gap: 0.5rem;
+  align-items: center;
+  width: fit-content;
+  margin: 0.9rem 0 0.7rem !important;
+  color: #52615f;
+  cursor: pointer;
+}
+
+.override-toggle input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--forest);
+}
+
+.server-summary {
+  display: grid;
+  gap: 0.15rem;
+  margin: 1rem 0 0;
+  padding: 0.7rem 0.8rem;
+  border-left: 3px solid var(--mint);
+  background: rgba(191, 233, 212, 0.2);
+  font-size: 0.7rem;
+}
+
+.server-summary span {
+  overflow: hidden;
+  color: #65716f;
+  font-family: 'JetBrains Mono Variable', monospace;
+  font-size: 0.58rem;
+  text-overflow: ellipsis;
 }
 
 .session-card p:not(.eyebrow) {
@@ -492,6 +590,48 @@ button:disabled {
   color: #5a6866;
   font-size: 0.84rem;
   line-height: 1.6;
+}
+
+.event-ledger {
+  display: grid;
+  gap: 0.6rem;
+  max-height: 24rem;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.event-ledger li {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+  background: rgba(255, 255, 255, 0.38);
+}
+
+.event-ledger li > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.7rem;
+}
+
+.event-ledger li span {
+  color: #697472;
+}
+
+.event-ledger p {
+  margin: 0;
+  font-size: 0.83rem;
+}
+
+.event-ledger code {
+  overflow: hidden;
+  color: #6d7775;
+  font-size: 0.57rem;
+  text-overflow: ellipsis;
 }
 
 footer {

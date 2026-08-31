@@ -27,9 +27,19 @@ export interface WorkflowRepository {
 }
 
 export interface CredentialStore {
-  read(accountId: AccountId): Promise<string | undefined>;
-  write(accountId: AccountId, accessToken: string): Promise<void>;
-  clear(accountId: AccountId): Promise<void>;
+  read(): Promise<MatrixSessionCredentials | undefined>;
+  write(credentials: MatrixSessionCredentials): Promise<void>;
+  clear(): Promise<void>;
+}
+
+export interface MatrixSessionCredentials {
+  readonly accountId: AccountId;
+  readonly baseUrl: string;
+  readonly userId: string;
+  readonly deviceId: string;
+  readonly accessToken: string;
+  readonly refreshToken?: string;
+  readonly expiresAt?: number;
 }
 
 export interface InstanceLease {

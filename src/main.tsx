@@ -4,6 +4,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import { App } from './app/App';
+import { AckWatchController } from './application/app-controller';
 import './app/app.css';
 
 const rootElement = document.querySelector('#root');
@@ -22,9 +23,12 @@ if (import.meta.env.MODE === 'catalog') {
     </StrictMode>,
   );
 } else {
+  const controller = new AckWatchController();
+  void controller.initialize();
+  window.addEventListener('pagehide', () => void controller.teardown(), { once: true });
   root.render(
     <StrictMode>
-      <App />
+      <App controller={controller} />
     </StrictMode>,
   );
 }

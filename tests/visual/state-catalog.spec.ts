@@ -5,6 +5,12 @@ const scenarios = [
   { name: 'signed-out-desktop', state: 'signed-out', viewport: { width: 1440, height: 1000 } },
   { name: 'ready-desktop', state: 'ready', viewport: { width: 1440, height: 1000 } },
   { name: 'armed-desktop', state: 'armed', viewport: { width: 1440, height: 1000 } },
+  { name: 'baseline-desktop', state: 'baseline', viewport: { width: 1440, height: 1000 } },
+  { name: 'received-desktop', state: 'received', viewport: { width: 1440, height: 1120 } },
+  { name: 'reconnecting-desktop', state: 'reconnecting', viewport: { width: 1440, height: 1000 } },
+  { name: 'recovering-desktop', state: 'recovering', viewport: { width: 1440, height: 1000 } },
+  { name: 'incomplete-desktop', state: 'incomplete', viewport: { width: 1440, height: 1000 } },
+  { name: 'second-tab-desktop', state: 'second-tab', viewport: { width: 1440, height: 1000 } },
   { name: 'signed-out-narrow', state: 'signed-out', viewport: { width: 390, height: 1100 } },
 ] as const;
 

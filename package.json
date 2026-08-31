@@ -23,6 +23,8 @@
     "test:unit": "vitest run",
     "test:browser": "env -u FORCE_COLOR PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright test --project=chromium --project=firefox",
     "test:visual": "npm run build:catalog && env -u FORCE_COLOR PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright test --config=playwright.visual.config.ts --project=visual && node tools/generate-gallery.mjs",
+    "test:matrix:local": "npm run build && env -u FORCE_COLOR PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright node tests/matrix/local-controller.mjs",
+    "test:matrix:remote": "npm run build && node --env-file-if-exists=.env.test.local tests/matrix/remote-controller.mjs",
     "setup:browsers": "env -u FORCE_COLOR PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright install chromium firefox",
     "check:fast": "npm run format:check && npm run lint && npm run typecheck && npm run test:unit",
     "audit:secrets": "secretlint '**/*' --secretlintignore .gitignore",
@@ -30,14 +32,18 @@
     "audit:dependencies": "npm audit --audit-level=high",
     "report:licenses": "node tools/report-licenses.mjs",
     "report:gate1": "node tools/generate-gate1-report.mjs",
-    "check:gate1": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate1"
+    "report:gate2": "node tools/generate-gate2-report.mjs",
+    "check:gate1": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate1",
+    "check:gate2": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run test:matrix:local && npm run test:matrix:remote && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate2"
   },
   "dependencies": {
     "@fontsource-variable/jetbrains-mono": "5.3.0",
     "@fontsource-variable/manrope": "5.3.0",
     "dexie": "4.4.5",
+    "matrix-js-sdk": "42.2.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "zod": "4.5.4"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
@@ -55,6 +61,7 @@
     "eslint": "10.9.1",
     "eslint-plugin-react-hooks": "7.1.1",
     "eslint-plugin-react-refresh": "0.5.5",
+    "fake-indexeddb": "6.2.5",
     "globals": "17.11.0",
     "jsdom": "29.1.1",
     "prettier": "3.9.6",

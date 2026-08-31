@@ -19,9 +19,9 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   reactHooks.configs.flat.recommended,
   {
-    files: ['tools/**/*.mjs'],
+    files: ['**/*.mjs'],
     languageOptions: {
-      globals: globals.node,
+      globals: { ...globals.browser, ...globals.node },
     },
   },
   {

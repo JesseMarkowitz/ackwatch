@@ -1,0 +1,25 @@
+name: ackwatch-matrix-test
+
+services:
+  synapse:
+    image: matrixdotorg/synapse:v1.157.2@sha256:097e3120b8ecf97e4f92537d7af2da41564c706e33fc740f3741c9defacc2af1
+    environment:
+      GID: '${ACKWATCH_TEST_GID:-1000}'
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+      UID: '${ACKWATCH_TEST_UID:-1000}'
+    ports:
+      - '127.0.0.1:18008:8008'
+    volumes:
+      - ../../.matrix-test-state/synapse:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8008/_matrix/client/versions', timeout=2)
+      interval: 2s
+      timeout: 3s
+      retries: 45
+      start_period: 5s
