@@ -1,0 +1,705 @@
+import { z } from 'zod';
+
+import {
+  acceptAdditionalActivity,
+  applyActivityMaintenance,
+  applyQueueCommand,
+  compareQueueItems,
+  conversationKeyFor,
+  createQueueItem,
+  defaultQueueSettings,
+  evaluateDeadlines,
+  mergeThreadItems,
+  type ActivityMaintenanceCommand,
+  type AlertEffect,
+  type QueueActivity,
+  type QueueCommand,
+  type QueueItem,
+  type QueueSettings,
+  type WorkflowTransition,
+} from '../../domain/queue';
+import {
+  WorkflowDatabase,
+  type AccountSettingsRecord,
+  type ConversationRecord,
+  type QuarantinedRecord,
+  type PersistedIngestionIssueRecord,
+} from './workflow-database';
+
+const deadlineSchema = z.object({
+  firstAt: z.number().int().nonnegative(),
+  repeatEveryMs: z.number().int().positive(),
+  kind: z.enum(['unacknowledged', 'acknowledged']),
+});
+const queueItemSchema: z.ZodType<QueueItem> = z.object({
+  id: z.string().min(1),
+  accountId: z.string().min(1),
+  conversationKey: z.string().min(1),
+  roomId: z.string().startsWith('!'),
+  rootEventId: z.string().startsWith('$').optional(),
+  cycleId: z.string().min(1),
+  status: z.enum(['NEW', 'UNACKNOWLEDGED', 'ACKNOWLEDGED', 'COMPLETED']),
+  activityCount: z.number().int().positive(),
+  unseenActivityCount: z.number().int().nonnegative(),
+  needsAttention: z.boolean(),
+  firstDetectedAt: z.number().int().nonnegative(),
+  lastActivityAt: z.number().int().nonnegative(),
+  createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+  firstViewedAt: z.number().int().nonnegative().optional(),
+  acknowledgedAt: z.number().int().nonnegative().optional(),
+  completedAt: z.number().int().nonnegative().optional(),
+  reopenedCount: z.number().int().nonnegative(),
+  deadline: deadlineSchema.optional(),
+});
+const activitySchema: z.ZodType<QueueActivity> = z.object({
+  id: z.string().min(1),
+  accountId: z.string().min(1),
+  eventId: z.string().startsWith('$'),
+  itemId: z.string().min(1),
+  roomId: z.string().startsWith('!'),
+  sender: z.string().startsWith('@'),
+  eventType: z.string().min(1),
+  messageType: z.string().min(1),
+  preview: z.string().max(160),
+  detectedAt: z.number().int().nonnegative(),
+  localSequence: z.number().int().nonnegative(),
+  provenance: z.string().min(1),
+  contentState: z.enum(['clear', 'encrypted_placeholder', 'unavailable']),
+  edited: z.boolean(),
+  redacted: z.boolean(),
+  relationKind: z.enum(['independent', 'thread', 'reply']),
+  relationEventId: z.string().startsWith('$').optional(),
+  roomName: z.string().optional(),
+});
+const transitionSchema: z.ZodType<WorkflowTransition> = z.object({
+  id: z.string().min(1),
+  accountId: z.string().min(1),
+  itemId: z.string().min(1),
+  cycleId: z.string().min(1),
+  command: z.enum([
+    'mark_viewed',
+    'acknowledge',
+    'review_new_activity',
+    'complete',
+    'manual_reopen',
+    'accept_activity',
+    'thread_merge',
+  ]),
+  fromStatus: z.enum(['NEW', 'UNACKNOWLEDGED', 'ACKNOWLEDGED', 'COMPLETED']).optional(),
+  toStatus: z.enum(['NEW', 'UNACKNOWLEDGED', 'ACKNOWLEDGED', 'COMPLETED']),
+  at: z.number().int().nonnegative(),
+  sequence: z.number().int().nonnegative(),
+  sourceItemId: z.string().optional(),
+});
+const effectSchema: z.ZodType<AlertEffect> = z.object({
+  id: z.string().min(1),
+  accountId: z.string().min(1),
+  itemId: z.string().min(1),
+  cycleId: z.string().min(1),
+  kind: z.enum(['initial', 'reopen', 'unacknowledged', 'acknowledged']),
+  stage: z.number().int().nonnegative(),
+  dueAt: z.number().int().nonnegative(),
+  status: z.enum(['pending', 'cancelled']),
+});
+const settingsSchema: z.ZodType<AccountSettingsRecord> = z.object({
+  accountId: z.string().min(1),
+  schemaVersion: z.literal(1),
+  unacknowledgedAfterMs: z.number().int().positive(),
+  unacknowledgedRepeatMs: z.number().int().positive(),
+  acknowledgedAfterMs: z.number().int().positive(),
+  acknowledgedRepeatMs: z.number().int().positive(),
+  diagnosticsRetentionDays: z.number().int().min(1).max(3650),
+  previewPrivacy: z.enum(['short', 'generic']),
+  audioEnabled: z.boolean(),
+  browserNotificationsEnabled: z.boolean(),
+  webhookEnabled: z.boolean(),
+  updatedAt: z.number().int().nonnegative(),
+});
+
+export interface AcceptedActivityInput {
+  readonly accountId: string;
+  readonly eventId: string;
+  readonly roomId: string;
+  readonly sender: string;
+  readonly eventType: string;
+  readonly messageType: string;
+  readonly preview: string;
+  readonly detectedAt: number;
+  readonly localSequence: number;
+  readonly provenance: string;
+  readonly contentState?: QueueActivity['contentState'];
+  readonly relationKind?: QueueActivity['relationKind'];
+  readonly relationEventId?: string;
+  readonly roomName?: string;
+}
+
+export type PersistenceFaultPoint =
+  'after_activity' | 'after_item' | 'after_conversation' | 'after_transition' | 'after_effect';
+
+export interface WorkflowProjection {
+  readonly items: readonly QueueItem[];
+  readonly activities: readonly QueueActivity[];
+  readonly transitions: readonly WorkflowTransition[];
+  readonly effects: readonly AlertEffect[];
+  readonly quarantineCount: number;
+}
+
+export type StorageHealth =
+  | { readonly state: 'healthy' }
+  | { readonly state: 'blocked' | 'closed' | 'corrupt' | 'failed'; readonly detail: string };
+
+export interface AcceptResult {
+  readonly status: 'accepted' | 'duplicate';
+  readonly itemId?: string;
+}
+
+function recordId(accountId: string, value: string): string {
+  return `${accountId}|${value}`;
+}
+
+function queueSettings(settings: AccountSettingsRecord): QueueSettings {
+  return {
+    unacknowledgedAfterMs: settings.unacknowledgedAfterMs,
+    unacknowledgedRepeatMs: settings.unacknowledgedRepeatMs,
+    acknowledgedAfterMs: settings.acknowledgedAfterMs,
+    acknowledgedRepeatMs: settings.acknowledgedRepeatMs,
+  };
+}
+
+export function defaultAccountSettings(accountId: string, now: number): AccountSettingsRecord {
+  return {
+    accountId,
+    schemaVersion: 1,
+    ...defaultQueueSettings,
+    diagnosticsRetentionDays: 30,
+    previewPrivacy: 'short',
+    audioEnabled: false,
+    browserNotificationsEnabled: false,
+    webhookEnabled: false,
+    updatedAt: now,
+  };
+}
+
+export class WorkflowRepository {
+  private readonly database: WorkflowDatabase;
+  private intentionallyClosing = false;
+
+  public constructor(
+    databaseName = 'ackwatch-workflow',
+    private readonly idFactory: () => string = () => crypto.randomUUID(),
+    private readonly now: () => number = () => Date.now(),
+    private readonly onStorageHealth: (health: StorageHealth) => void = () => undefined,
+  ) {
+    this.database = new WorkflowDatabase(databaseName);
+    this.database.on('blocked', () => {
+      this.onStorageHealth({
+        state: 'blocked',
+        detail: 'Workflow storage upgrade is blocked by another open AckWatch page.',
+      });
+    });
+    this.database.on('versionchange', () => {
+      this.onStorageHealth({
+        state: 'closed',
+        detail: 'Workflow storage closed for a schema upgrade in another page.',
+      });
+      this.database.close();
+    });
+    this.database.on('close', () => {
+      if (!this.intentionallyClosing) {
+        this.onStorageHealth({
+          state: 'closed',
+          detail: 'Workflow storage closed unexpectedly. Durable acceptance is unavailable.',
+        });
+      }
+    });
+  }
+
+  public async open(): Promise<void> {
+    try {
+      await this.database.open();
+      this.onStorageHealth({ state: 'healthy' });
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : 'Workflow storage failed to open.';
+      this.onStorageHealth({ state: 'failed', detail });
+      throw error;
+    }
+  }
+
+  public async acceptActivity(
+    input: AcceptedActivityInput,
+    faultAfter?: PersistenceFaultPoint,
+  ): Promise<AcceptResult> {
+    try {
+      return await this.database.transaction(
+        'rw',
+        [
+          this.database.activities,
+          this.database.queueItems,
+          this.database.conversationKeys,
+          this.database.workflowTransitions,
+          this.database.alertEffects,
+          this.database.settings,
+        ],
+        async () => {
+          const activityId = recordId(input.accountId, input.eventId);
+          if (await this.database.activities.get(activityId)) return { status: 'duplicate' };
+
+          let settings = await this.database.settings.get(input.accountId);
+          if (!settings) {
+            settings = defaultAccountSettings(input.accountId, input.detectedAt);
+            await this.database.settings.add(settings);
+          }
+          const eventKey = conversationKeyFor(input.roomId, input.eventId);
+          const rootEventId = input.relationKind === 'thread' ? input.relationEventId : undefined;
+          const threadKey = rootEventId
+            ? conversationKeyFor(input.roomId, input.eventId, rootEventId)
+            : conversationKeyFor(input.roomId, input.eventId, input.eventId);
+          const eventConversation = await this.database.conversationKeys.get(
+            recordId(input.accountId, eventKey),
+          );
+          const threadConversation = await this.database.conversationKeys.get(
+            recordId(input.accountId, threadKey),
+          );
+          let itemRecord: QueueItem | undefined;
+          let activeKey = eventKey;
+
+          if (rootEventId) {
+            const rootKey = conversationKeyFor(input.roomId, rootEventId);
+            const rootConversation = await this.database.conversationKeys.get(
+              recordId(input.accountId, rootKey),
+            );
+            activeKey = threadKey;
+            if (
+              rootConversation &&
+              threadConversation &&
+              rootConversation.itemId !== threadConversation.itemId
+            ) {
+              itemRecord = await this.mergeItems(
+                rootConversation,
+                threadConversation,
+                threadKey,
+                rootEventId,
+                input.detectedAt,
+              );
+            } else {
+              const selected = rootConversation ?? threadConversation;
+              if (selected) {
+                itemRecord = await this.database.queueItems.get(selected.itemId);
+                if (itemRecord && itemRecord.conversationKey !== threadKey) {
+                  itemRecord = { ...itemRecord, conversationKey: threadKey, rootEventId };
+                  await this.database.queueItems.put(itemRecord);
+                  await this.database.conversationKeys.delete(selected.id);
+                  await this.database.conversationKeys.put({
+                    id: recordId(input.accountId, threadKey),
+                    accountId: input.accountId,
+                    key: threadKey,
+                    itemId: itemRecord.id,
+                  });
+                }
+              }
+            }
+          } else if (threadConversation) {
+            activeKey = threadKey;
+            itemRecord = await this.database.queueItems.get(threadConversation.itemId);
+          } else if (eventConversation) {
+            itemRecord = await this.database.queueItems.get(eventConversation.itemId);
+          }
+
+          const itemId = itemRecord?.id ?? this.idFactory();
+          const activity: QueueActivity = activitySchema.parse({
+            id: activityId,
+            accountId: input.accountId,
+            eventId: input.eventId,
+            itemId,
+            roomId: input.roomId,
+            sender: input.sender,
+            eventType: input.eventType,
+            messageType: input.messageType,
+            preview: settings.previewPrivacy === 'generic' ? 'New Matrix activity' : input.preview,
+            detectedAt: input.detectedAt,
+            localSequence: input.localSequence,
+            provenance: input.provenance,
+            contentState: input.contentState ?? 'clear',
+            edited: false,
+            redacted: false,
+            relationKind: input.relationKind ?? 'independent',
+            ...(input.relationEventId === undefined
+              ? {}
+              : { relationEventId: input.relationEventId }),
+            ...(input.roomName === undefined ? {} : { roomName: input.roomName }),
+          });
+          await this.database.activities.add(activity);
+          this.inject(faultAfter, 'after_activity');
+
+          const transitionSequence = itemRecord
+            ? await this.database.workflowTransitions.where('itemId').equals(itemRecord.id).count()
+            : 0;
+          const mutation = itemRecord
+            ? acceptAdditionalActivity(
+                itemRecord,
+                input.detectedAt,
+                this.idFactory(),
+                queueSettings(settings),
+                transitionSequence,
+              )
+            : createQueueItem({
+                id: itemId,
+                accountId: input.accountId,
+                conversationKey: activeKey,
+                roomId: input.roomId,
+                eventId: input.eventId,
+                cycleId: this.idFactory(),
+                detectedAt: input.detectedAt,
+                settings: queueSettings(settings),
+                ...(rootEventId === undefined ? {} : { rootEventId }),
+              });
+          await this.database.queueItems.put(queueItemSchema.parse(mutation.item));
+          this.inject(faultAfter, 'after_item');
+
+          if (!itemRecord) {
+            const conversation: ConversationRecord = {
+              id: recordId(input.accountId, activeKey),
+              accountId: input.accountId,
+              key: activeKey,
+              itemId,
+            };
+            await this.database.conversationKeys.add(conversation);
+          }
+          this.inject(faultAfter, 'after_conversation');
+
+          if (mutation.transition) {
+            await this.database.workflowTransitions.add(
+              transitionSchema.parse(mutation.transition),
+            );
+          }
+          this.inject(faultAfter, 'after_transition');
+          if (mutation.effects.length > 0) {
+            await this.database.alertEffects.bulkAdd(
+              mutation.effects.map((effect) => effectSchema.parse(effect)),
+            );
+          }
+          this.inject(faultAfter, 'after_effect');
+          return { status: 'accepted', itemId };
+        },
+      );
+    } catch (error: unknown) {
+      this.onStorageHealth({
+        state: 'failed',
+        detail: error instanceof Error ? error.message : 'Workflow transaction failed.',
+      });
+      throw error;
+    }
+  }
+
+  public async applyCommand(
+    accountId: string,
+    itemId: string,
+    command: QueueCommand,
+  ): Promise<void> {
+    await this.database.transaction(
+      'rw',
+      [
+        this.database.queueItems,
+        this.database.workflowTransitions,
+        this.database.alertEffects,
+        this.database.settings,
+      ],
+      async () => {
+        const item = queueItemSchema.parse(await this.database.queueItems.get(itemId));
+        if (item.accountId !== accountId) throw new Error('Queue item belongs to another account.');
+        const settings =
+          (await this.database.settings.get(accountId)) ??
+          defaultAccountSettings(accountId, command.at);
+        const sequence = await this.database.workflowTransitions
+          .where('itemId')
+          .equals(itemId)
+          .count();
+        const mutation = applyQueueCommand(item, command, queueSettings(settings), sequence);
+        if (!mutation.changed) return;
+        await this.database.queueItems.put(queueItemSchema.parse(mutation.item));
+        if (command.kind === 'acknowledge' || command.kind === 'complete') {
+          await this.database.alertEffects
+            .where('itemId')
+            .equals(itemId)
+            .filter(
+              (effect) =>
+                effect.cycleId === item.cycleId &&
+                effect.status === 'pending' &&
+                (command.kind === 'complete' || effect.kind === 'unacknowledged'),
+            )
+            .modify({ status: 'cancelled' });
+        }
+        if (mutation.transition) {
+          await this.database.workflowTransitions.add(transitionSchema.parse(mutation.transition));
+        }
+        if (mutation.effects.length > 0) {
+          await this.database.alertEffects.bulkAdd(
+            mutation.effects.map((effect) => effectSchema.parse(effect)),
+          );
+        }
+      },
+    );
+  }
+
+  public async evaluateDeadlines(accountId: string, now: number): Promise<number> {
+    return await this.database.transaction(
+      'rw',
+      [this.database.queueItems, this.database.alertEffects],
+      async () => {
+        const items = await this.database.queueItems.where('accountId').equals(accountId).toArray();
+        let inserted = 0;
+        for (const raw of items) {
+          const item = queueItemSchema.parse(raw);
+          for (const effect of evaluateDeadlines(item, now)) {
+            if (!(await this.database.alertEffects.get(effect.id))) {
+              await this.database.alertEffects.add(effectSchema.parse(effect));
+              inserted += 1;
+            }
+          }
+        }
+        return inserted;
+      },
+    );
+  }
+
+  public async applyMaintenance(
+    accountId: string,
+    targetEventId: string,
+    command: ActivityMaintenanceCommand,
+  ): Promise<boolean> {
+    const id = recordId(accountId, targetEventId);
+    return await this.database.transaction('rw', this.database.activities, async () => {
+      const existing = await this.database.activities.get(id);
+      if (!existing) return false;
+      await this.database.activities.put(
+        activitySchema.parse(applyActivityMaintenance(activitySchema.parse(existing), command)),
+      );
+      return true;
+    });
+  }
+
+  public async recordIngestionIssue(
+    issue: Omit<PersistedIngestionIssueRecord, 'id' | 'status'>,
+  ): Promise<void> {
+    const id = recordId(
+      issue.accountId,
+      `issue:${issue.eventId ?? issue.roomId ?? 'unknown'}:${issue.code}:${issue.detectedAt}`,
+    );
+    await this.database.ingestionIssues.put({ ...issue, id, status: 'open' });
+  }
+
+  public async beginMonitoringSession(
+    accountId: string,
+    sessionId: string,
+    startedAt: number,
+  ): Promise<void> {
+    await this.database.monitoringSessions.add({ id: sessionId, accountId, startedAt });
+  }
+
+  public async endMonitoringSession(
+    sessionId: string,
+    stoppedAt: number,
+    stopReason: string,
+  ): Promise<void> {
+    await this.database.monitoringSessions.update(sessionId, { stoppedAt, stopReason });
+  }
+
+  public async getSettings(accountId: string): Promise<AccountSettingsRecord> {
+    const existing = await this.database.settings.get(accountId);
+    return existing
+      ? settingsSchema.parse(existing)
+      : defaultAccountSettings(accountId, this.now());
+  }
+
+  public async putSettings(settings: AccountSettingsRecord): Promise<void> {
+    await this.database.settings.put(settingsSchema.parse(settings));
+  }
+
+  public async exportSettings(accountId: string): Promise<string> {
+    const settings = await this.getSettings(accountId);
+    return JSON.stringify({ kind: 'ackwatch-settings', version: 1, settings }, null, 2);
+  }
+
+  public async importSettings(
+    accountId: string,
+    serialized: string,
+  ): Promise<AccountSettingsRecord> {
+    const envelope = z
+      .object({
+        kind: z.literal('ackwatch-settings'),
+        version: z.literal(1),
+        settings: settingsSchema,
+      })
+      .parse(JSON.parse(serialized));
+    const imported = settingsSchema.parse({
+      ...envelope.settings,
+      accountId,
+      webhookEnabled: false,
+      updatedAt: this.now(),
+    });
+    await this.database.settings.put(imported);
+    return imported;
+  }
+
+  public async projection(accountId: string): Promise<WorkflowProjection> {
+    const rawItems = await this.database.queueItems.where('accountId').equals(accountId).toArray();
+    const items: QueueItem[] = [];
+    for (const raw of rawItems) {
+      const parsed = queueItemSchema.safeParse(raw);
+      if (parsed.success) items.push(parsed.data);
+      else await this.quarantineItem(accountId, raw, parsed.error.message);
+    }
+    const activities = (
+      await this.database.activities.where('accountId').equals(accountId).toArray()
+    ).map((activity) => activitySchema.parse(activity));
+    const transitions = (
+      await this.database.workflowTransitions.where('accountId').equals(accountId).toArray()
+    ).map((transition) => transitionSchema.parse(transition));
+    const effects = (
+      await this.database.alertEffects.where('accountId').equals(accountId).toArray()
+    ).map((effect) => effectSchema.parse(effect));
+    const quarantineCount = await this.database.quarantine
+      .where('accountId')
+      .equals(accountId)
+      .count();
+    return {
+      items: items.sort(compareQueueItems),
+      activities: activities.sort(
+        (left, right) =>
+          left.detectedAt - right.detectedAt ||
+          left.localSequence - right.localSequence ||
+          left.eventId.localeCompare(right.eventId),
+      ),
+      transitions,
+      effects,
+      quarantineCount,
+    };
+  }
+
+  public async clearAccount(accountId: string): Promise<void> {
+    await this.database.transaction(
+      'rw',
+      [
+        this.database.queueItems,
+        this.database.activities,
+        this.database.conversationKeys,
+        this.database.workflowTransitions,
+        this.database.alertEffects,
+        this.database.settings,
+        this.database.monitoringSessions,
+        this.database.ingestionIssues,
+        this.database.quarantine,
+      ],
+      async () => {
+        await Promise.all([
+          this.database.queueItems.where('accountId').equals(accountId).delete(),
+          this.database.activities.where('accountId').equals(accountId).delete(),
+          this.database.conversationKeys.where('accountId').equals(accountId).delete(),
+          this.database.workflowTransitions.where('accountId').equals(accountId).delete(),
+          this.database.alertEffects.where('accountId').equals(accountId).delete(),
+          this.database.settings.delete(accountId),
+          this.database.monitoringSessions.where('accountId').equals(accountId).delete(),
+          this.database.ingestionIssues.where('accountId').equals(accountId).delete(),
+          this.database.quarantine.where('accountId').equals(accountId).delete(),
+        ]);
+      },
+    );
+  }
+
+  public close(): void {
+    this.intentionallyClosing = true;
+    this.database.close();
+  }
+
+  /** Test support for released-schema migration fixtures and fault injection only. */
+  public unsafeDatabaseForTests(): WorkflowDatabase {
+    return this.database;
+  }
+
+  private inject(
+    requested: PersistenceFaultPoint | undefined,
+    current: PersistenceFaultPoint,
+  ): void {
+    if (requested === current) throw new Error(`Injected transaction failure at ${current}.`);
+  }
+
+  private async mergeItems(
+    leftConversation: ConversationRecord,
+    rightConversation: ConversationRecord,
+    threadKey: string,
+    rootEventId: string,
+    at: number,
+  ): Promise<QueueItem> {
+    const left = queueItemSchema.parse(await this.database.queueItems.get(leftConversation.itemId));
+    const right = queueItemSchema.parse(
+      await this.database.queueItems.get(rightConversation.itemId),
+    );
+    const itemIds = [left.id, right.id];
+    const activities = (
+      await this.database.activities.where('itemId').anyOf(itemIds).toArray()
+    ).map((activity) => activitySchema.parse(activity));
+    const transitions = (
+      await this.database.workflowTransitions.where('itemId').anyOf(itemIds).toArray()
+    ).map((transition) => transitionSchema.parse(transition));
+    const effects = (await this.database.alertEffects.where('itemId').anyOf(itemIds).toArray()).map(
+      (effect) => effectSchema.parse(effect),
+    );
+    const merged = mergeThreadItems({
+      left,
+      right,
+      activities,
+      transitions,
+      effects,
+      threadConversationKey: threadKey,
+      rootEventId,
+      at,
+      transitionSequence: transitions.length,
+    });
+    await this.database.queueItems.delete(merged.removedItemId);
+    await this.database.queueItems.put(queueItemSchema.parse(merged.item));
+    await this.database.activities.bulkPut(
+      merged.activities.map((activity) => activitySchema.parse(activity)),
+    );
+    await this.database.workflowTransitions.bulkPut(
+      merged.transitions.map((transition) => transitionSchema.parse(transition)),
+    );
+    await this.database.alertEffects.bulkPut(
+      merged.effects.map((effect) => effectSchema.parse(effect)),
+    );
+    await this.database.conversationKeys.delete(leftConversation.id);
+    await this.database.conversationKeys.delete(rightConversation.id);
+    await this.database.conversationKeys.put({
+      id: recordId(left.accountId, threadKey),
+      accountId: left.accountId,
+      key: threadKey,
+      itemId: merged.item.id,
+    });
+    return merged.item;
+  }
+
+  private async quarantineItem(accountId: string, raw: QueueItem, reason: string): Promise<void> {
+    const sourceKey = typeof raw.id === 'string' ? raw.id : this.idFactory();
+    const record: QuarantinedRecord = {
+      id: this.idFactory(),
+      accountId,
+      sourceStore: 'queueItems',
+      sourceKey,
+      reason: reason.slice(0, 500),
+      quarantinedAt: this.now(),
+      redactedShape: raw && typeof raw === 'object' ? Object.keys(raw).sort() : [],
+    };
+    await this.database.transaction(
+      'rw',
+      [this.database.queueItems, this.database.quarantine],
+      async () => {
+        await this.database.quarantine.add(record);
+        await this.database.queueItems.delete(sourceKey);
+      },
+    );
+    this.onStorageHealth({
+      state: 'corrupt',
+      detail: 'A corrupt queue record was quarantined instead of being loaded.',
+    });
+  }
+}

@@ -33,8 +33,10 @@
     "report:licenses": "node tools/report-licenses.mjs",
     "report:gate1": "node tools/generate-gate1-report.mjs",
     "report:gate2": "node tools/generate-gate2-report.mjs",
+    "report:gate3": "node tools/generate-gate3-report.mjs",
     "check:gate1": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate1",
-    "check:gate2": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run test:matrix:local && npm run test:matrix:remote && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate2"
+    "check:gate2": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run test:matrix:local && npm run test:matrix:remote && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate2",
+    "check:gate3": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run test:matrix:local && npm run test:matrix:remote && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate3"
   },
   "dependencies": {
     "@fontsource-variable/jetbrains-mono": "5.3.0",

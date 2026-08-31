@@ -1,17 +1,8 @@
-import Dexie, { type EntityTable } from 'dexie';
 import { z } from 'zod';
 
-export interface PersistedCoverageIssue {
-  readonly id: string;
-  readonly accountId: string;
-  readonly kind: 'gap_recovery';
-  readonly roomId: string;
-  readonly boundaryEventId: string;
-  readonly detail: string;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-  readonly status: 'open' | 'resolved';
-}
+import { WorkflowDatabase, type PersistedCoverageIssue } from './workflow-database';
+
+export type { PersistedCoverageIssue } from './workflow-database';
 
 const issueSchema = z.object({
   id: z.string().min(1),
@@ -25,22 +16,11 @@ const issueSchema = z.object({
   status: z.enum(['open', 'resolved']),
 });
 
-class CoverageDatabase extends Dexie {
-  public coverageIssues!: EntityTable<PersistedCoverageIssue, 'id'>;
-
-  public constructor(name: string) {
-    super(name);
-    this.version(1).stores({
-      coverageIssues: 'id, [accountId+status], accountId, roomId, updatedAt',
-    });
-  }
-}
-
 export class CoverageIssueRepository {
-  private readonly database: CoverageDatabase;
+  private readonly database: WorkflowDatabase;
 
   public constructor(databaseName = 'ackwatch-workflow') {
-    this.database = new CoverageDatabase(databaseName);
+    this.database = new WorkflowDatabase(databaseName);
   }
 
   public async open(): Promise<void> {

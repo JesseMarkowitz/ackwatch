@@ -29,3 +29,15 @@ Phase 2 keeps SDK callbacks behind a non-throwing serial ingestion boundary. An 
 lock is acquired before any SDK database opens. The coverage machine combines network baseline,
 ingestion drain, and gap state; connectivity alone can never claim healthy monitoring. Failed gap
 records live in a small adapter-owned database and do not become workflow queue items.
+
+Phase 3 adds a pure queue aggregate and a shared versioned workflow database. Qualifying normalized
+activity is accepted in one transaction across activity, item, conversation key, transition,
+effect intent, and settings stores. The controller refreshes the UI projection only after that
+transaction commits. Stable account/event identities make replay idempotent; stable conversation
+keys allow a root and racing thread reply to be promoted and merged atomically.
+
+Workflow records contain bounded text previews and metadata, not complete decrypted message
+bodies. Zod validates records at the repository boundary. Invalid queue records become redacted
+quarantine entries and storage health remains visibly degraded until the user resolves the data
+problem. Monitoring session records are durable for diagnostics, but monitoring intent itself is
+deliberately never restored.

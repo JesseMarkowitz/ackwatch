@@ -3,6 +3,7 @@ import {
   type DeveloperLedger,
   type IngestionEnvelope,
   type IngestionIssue,
+  type NormalizationResult,
   normalizeEnvelope,
 } from '../domain/ingestion';
 
@@ -15,6 +16,7 @@ export class SerialIngestion {
     private readonly coverage: CoverageMachine,
     private readonly ledger: DeveloperLedger,
     private readonly onChange: () => void,
+    private readonly onNormalized?: (result: NormalizationResult) => Promise<void>,
   ) {}
 
   /** Non-throwing SDK callback boundary. Failures become visible ledger issues. */
@@ -26,7 +28,9 @@ export class SerialIngestion {
     this.tail = this.tail
       .then(async () => {
         await Promise.resolve();
-        this.ledger.record(normalizeEnvelope(envelope, this.ownUserId));
+        const normalized = normalizeEnvelope(envelope, this.ownUserId);
+        await this.onNormalized?.(normalized);
+        this.ledger.record(normalized);
       })
       .catch((error: unknown) => {
         const issue: IngestionIssue = {

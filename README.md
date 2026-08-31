@@ -3,10 +3,10 @@
 AckWatch is a local-first attention monitor for Matrix. It is an independent open-source
 project and is not endorsed by The Matrix.org Foundation or Element.
 
-The application is at the Phase 2 Matrix coverage gate. It supports session-only password login,
-exclusive account ownership, a network-confirmed monitoring boundary, serial event intake, and
-durable limited-timeline diagnostics. The visible event ledger is proof instrumentation; the
-durable attention queue begins in Phase 3 after Gate 2 approval.
+The application is at the Phase 3 workflow-alpha gate. It supports session-only password login,
+exclusive account ownership, a network-confirmed monitoring boundary, serial event intake, and a
+durable attention workflow with thread merge, deadlines, settings transfer, storage health, and
+reload restoration. Monitoring still returns off after every reload.
 
 ## Requirements
 
@@ -44,7 +44,7 @@ npm run audit:dependencies
 npm run report:licenses
 ```
 
-`npm run check:gate2` runs the complete Phase 2 sequence. Generated reports, screenshots, traces, and the
+`npm run check:gate3` runs the complete Phase 3 sequence. Generated reports, screenshots, traces, and the
 HTML gallery are written beneath ignored `artifacts/`.
 
 See [Testing](./docs/TESTING.md), [Architecture](./docs/ARCHITECTURE.md), and the

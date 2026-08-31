@@ -7,6 +7,7 @@ export interface RawMatrixEvent {
   readonly type?: string;
   readonly originServerTs?: number;
   readonly content?: Readonly<Record<string, unknown>>;
+  readonly redacts?: string;
 }
 
 export interface IngestionEnvelope {
@@ -39,7 +40,20 @@ export interface SupportedActivity {
   readonly detectedAt: number;
   readonly localSequence: number;
   readonly provenance: DeliveryProvenance;
+  readonly contentState: 'clear';
+  readonly relationKind: 'independent' | 'thread' | 'reply';
+  readonly relationEventId?: string;
   readonly roomName?: string;
+}
+
+export interface MaintenanceMutation {
+  readonly kind: 'maintenance';
+  readonly mutation: 'edit' | 'redaction';
+  readonly accountId: string;
+  readonly targetEventId: string;
+  readonly roomId: string;
+  readonly detectedAt: number;
+  readonly preview?: string;
 }
 
 export interface IgnoredActivity {
@@ -57,11 +71,12 @@ export interface IngestionIssue {
   readonly detectedAt: number;
 }
 
-export type NormalizationResult = SupportedActivity | IgnoredActivity | IngestionIssue;
+export type NormalizationResult =
+  SupportedActivity | MaintenanceMutation | IgnoredActivity | IngestionIssue;
 
 export interface IngestionDecision {
   readonly eventId?: string;
-  readonly outcome: 'accepted' | 'ignored' | 'issue';
+  readonly outcome: 'accepted' | 'maintenance' | 'ignored' | 'issue';
   readonly reason: string;
 }
 
@@ -95,6 +110,41 @@ export function normalizeEnvelope(
     };
   }
 
+  const content = event.content ?? {};
+  const relatesTo =
+    content['m.relates_to'] && typeof content['m.relates_to'] === 'object'
+      ? (content['m.relates_to'] as Readonly<Record<string, unknown>>)
+      : undefined;
+  if (event.type === 'm.room.redaction' && event.redacts) {
+    return {
+      kind: 'maintenance',
+      mutation: 'redaction',
+      accountId: envelope.accountId,
+      targetEventId: event.redacts,
+      roomId: event.roomId,
+      detectedAt: envelope.detectedAt,
+    };
+  }
+  if (
+    event.type === 'm.room.message' &&
+    relatesTo?.rel_type === 'm.replace' &&
+    typeof relatesTo.event_id === 'string'
+  ) {
+    const newContent =
+      content['m.new_content'] && typeof content['m.new_content'] === 'object'
+        ? (content['m.new_content'] as Readonly<Record<string, unknown>>)
+        : undefined;
+    return {
+      kind: 'maintenance',
+      mutation: 'edit',
+      accountId: envelope.accountId,
+      targetEventId: relatesTo.event_id,
+      roomId: event.roomId,
+      detectedAt: envelope.detectedAt,
+      preview: boundedPreview(newContent?.body ?? content.body),
+    };
+  }
+
   if (envelope.provenance === 'backfill' || envelope.provenance === 'cache') {
     return { kind: 'ignored', reason: 'backfill_not_recovery', eventId: event.eventId };
   }
@@ -122,7 +172,6 @@ export function normalizeEnvelope(
     return { kind: 'ignored', reason: 'unsupported_event_type', eventId: event.eventId };
   }
 
-  const content = event.content ?? {};
   const messageType = content.msgtype;
   if (typeof messageType !== 'string' || !supportedMessageTypes.has(messageType as never)) {
     return { kind: 'ignored', reason: 'unsupported_message_type', eventId: event.eventId };
@@ -132,6 +181,22 @@ export function normalizeEnvelope(
     messageType === 'm.image' || messageType === 'm.file'
       ? boundedPreview(content.filename ?? content.body) || 'Attachment'
       : boundedPreview(content.body);
+  const replyMetadata =
+    relatesTo?.['m.in_reply_to'] && typeof relatesTo['m.in_reply_to'] === 'object'
+      ? (relatesTo['m.in_reply_to'] as Readonly<Record<string, unknown>>)
+      : undefined;
+  const relationEventId =
+    typeof relatesTo?.event_id === 'string'
+      ? relatesTo.event_id
+      : typeof replyMetadata?.event_id === 'string'
+        ? replyMetadata.event_id
+        : undefined;
+  const relationKind =
+    relatesTo?.rel_type === 'm.thread'
+      ? 'thread'
+      : relationEventId === undefined
+        ? 'independent'
+        : 'reply';
 
   return {
     kind: 'activity',
@@ -145,6 +210,9 @@ export function normalizeEnvelope(
     detectedAt: envelope.detectedAt,
     localSequence: envelope.localSequence,
     provenance: envelope.provenance,
+    contentState: 'clear',
+    relationKind,
+    ...(relationEventId === undefined ? {} : { relationEventId }),
     ...(envelope.roomName === undefined ? {} : { roomName: envelope.roomName }),
   };
 }
@@ -152,6 +220,7 @@ export function normalizeEnvelope(
 export class DeveloperLedger {
   private readonly eventIds = new Set<string>();
   private readonly activities: SupportedActivity[] = [];
+  private readonly mutations: MaintenanceMutation[] = [];
   private readonly issues: IngestionIssue[] = [];
   private readonly ignoreCounts = new Map<IgnoreReason, number>();
   private readonly decisions: IngestionDecision[] = [];
@@ -173,6 +242,15 @@ export class DeveloperLedger {
       this.eventIds.add(result.eventId);
       this.activities.push(result);
       this.decisions.push({ eventId: result.eventId, outcome: 'accepted', reason: 'activity' });
+      return true;
+    }
+    if (result.kind === 'maintenance') {
+      this.mutations.push(result);
+      this.decisions.push({
+        eventId: result.targetEventId,
+        outcome: 'maintenance',
+        reason: result.mutation,
+      });
       return true;
     }
     if (result.kind === 'issue') {
@@ -204,12 +282,14 @@ export class DeveloperLedger {
 
   public snapshot(): {
     readonly activities: readonly SupportedActivity[];
+    readonly mutations: readonly MaintenanceMutation[];
     readonly issues: readonly IngestionIssue[];
     readonly ignoreCounts: Readonly<Record<IgnoreReason, number>>;
     readonly decisions: readonly IngestionDecision[];
   } {
     return {
       activities: [...this.activities],
+      mutations: [...this.mutations],
       issues: [...this.issues],
       ignoreCounts: Object.fromEntries(this.ignoreCounts) as Readonly<Record<IgnoreReason, number>>,
       decisions: [...this.decisions],

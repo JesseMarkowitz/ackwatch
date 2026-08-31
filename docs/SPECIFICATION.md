@@ -441,7 +441,7 @@ V1 is acceptable only when:
 ## 12. Approval decisions
 
 Specification version 1.3 and the implementation plan were approved by the developer on
-2026-08-31. Phase 2 was explicitly authorized after Gate 1.
+2026-08-31. Phase 2 was approved and Phase 3 was explicitly authorized on 2026-08-31.
 
 The following decisions are resolved and locked:
 

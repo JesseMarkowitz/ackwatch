@@ -1,4 +1,4 @@
-# Phase 2 requirement traceability
+# Gate requirement traceability
 
 This matrix maps the Gate 2 requirement families to executable evidence. “Phase 2 slice” means the
 requirement is proven to the extent scheduled by the approved implementation plan; later-phase
@@ -20,3 +20,18 @@ semantics are called out rather than reported as complete.
 
 The machine-readable Gate 2 report repeats the exact IDs and evidence groups in
 `artifacts/reports/gate2-summary.json` after `npm run check:gate2`.
+
+## Phase 3 workflow alpha
+
+| IDs                        | Gate 3 evidence                                                                                                                                   | Result / boundary                                                                                                                                                                                                |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| QUE-001–004                | `queue.test.ts`, `workflow-repository.test.ts`, local Matrix thread scenario                                                                      | Opaque identities, unique conversation keys, and root/reply promotion in either arrival order preserve one item, all activities, transitions, and one pending effect.                                            |
+| QUE-010–020                | exhaustive command table and generated invariant replay in `queue.test.ts`; repository rejected-command test                                      | Every state/command pair, cycles, counts, maintenance, deterministic failure, and no partial persistent mutation pass.                                                                                           |
+| DDL-001–006                | exact-boundary domain tests and repository deadline-intent test                                                                                   | Deadlines are materialized per cycle/acknowledgement, do not slide, insert idempotently, and cancel on completion. Dispatch is intentionally Phase 4.                                                            |
+| DB-001–004                 | v1 migration, five-point fault injection, concurrent duplicate, thread transaction, controller durable callback, Chromium/Firefox IndexedDB tests | Versioned validated records, atomic commit/rollback, unique event intake, and projection-after-commit pass.                                                                                                      |
+| DB-005–008                 | storage-health tests, corruption quarantine, persistence controls, settings export/import, state restoration                                      | Failure is visible, persistence is user-requested, completed items are retained, and settings remain account scoped. Explicit cleanup and long-term diagnostic retention remain before-V1 work under DB-007/008. |
+| UI-001–009, UI-011, UI-013 | `App.test.tsx`, 14-state visual catalog, local Matrix workflow screenshots                                                                        | Health/fault status, three work regions, domain actions, Matrix URI behavior, safe text, accessibility scan, focus/keyboard behavior, narrow layout, and non-color state pass.                                   |
+| UI-010, UI-012             | Phase 4 E2EE/detail milestone                                                                                                                     | Full on-demand SDK/crypto detail is intentionally not claimed at Gate 3; durable preview/detail-unavailable behavior is the Phase 3 base.                                                                        |
+
+The machine-readable Gate 3 report repeats the exact IDs and evidence groups in
+`artifacts/reports/gate3-summary.json` after `npm run check:gate3`.

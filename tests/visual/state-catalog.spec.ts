@@ -11,7 +11,20 @@ const scenarios = [
   { name: 'recovering-desktop', state: 'recovering', viewport: { width: 1440, height: 1000 } },
   { name: 'incomplete-desktop', state: 'incomplete', viewport: { width: 1440, height: 1000 } },
   { name: 'second-tab-desktop', state: 'second-tab', viewport: { width: 1440, height: 1000 } },
+  { name: 'workflow-desktop', state: 'workflow', viewport: { width: 1440, height: 1200 } },
+  {
+    name: 'workflow-detail-desktop',
+    state: 'workflow',
+    viewport: { width: 1440, height: 1100 },
+    openDetails: true,
+  },
+  {
+    name: 'storage-fault-desktop',
+    state: 'storage-fault',
+    viewport: { width: 1440, height: 1000 },
+  },
   { name: 'signed-out-narrow', state: 'signed-out', viewport: { width: 390, height: 1100 } },
+  { name: 'workflow-narrow', state: 'workflow', viewport: { width: 390, height: 1400 } },
 ] as const;
 
 for (const scenario of scenarios) {
@@ -21,6 +34,10 @@ for (const scenario of scenarios) {
     await page.evaluate(() => document.fonts.ready);
 
     await expect(page.locator('html')).toHaveAttribute('data-catalog-state', scenario.state);
+    if ('openDetails' in scenario && scenario.openDetails) {
+      await page.getByRole('button', { name: 'View details' }).first().click();
+      await expect(page.getByRole('dialog')).toBeVisible();
+    }
     await page.screenshot({
       animations: 'disabled',
       fullPage: true,

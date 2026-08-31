@@ -1,3 +1,5 @@
+import 'fake-indexeddb/auto';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
@@ -8,8 +10,10 @@ import type {
 } from './ports';
 import { AckWatchController } from './app-controller';
 import type { Clock } from '../domain/clock';
+import type { NormalizationResult } from '../domain/ingestion';
 import { MatrixAuthentication } from '../infrastructure/matrix/authentication';
 import { CoverageIssueRepository } from '../infrastructure/persistence/coverage-issue-repository';
+import { WorkflowRepository } from '../infrastructure/persistence/workflow-repository';
 
 const clock: Clock = { now: () => 50_000 };
 const credentials: MatrixSessionCredentials = {
@@ -45,12 +49,28 @@ function availableCoordinator(log: string[]): InstanceCoordinator {
   };
 }
 
+function durableDependencies() {
+  return {
+    storageHealth: {
+      inspect: async () => ({ available: true, persistenceSupported: true }),
+      requestPersistence: async () => ({
+        available: true,
+        persistenceSupported: true,
+        persistent: true,
+      }),
+    },
+    createWorkflowRepository: (onHealth: ConstructorParameters<typeof WorkflowRepository>[3]) =>
+      new WorkflowRepository(`controller-${crypto.randomUUID()}`, undefined, undefined, onHealth),
+  };
+}
+
 describe('AckWatchController', () => {
   it('acquires ownership before constructing stores/runtime and starts unarmed', async () => {
     const log: string[] = [];
     const credentialStore = new MemoryCredentials();
     credentialStore.value = credentials;
     const controller = new AckWatchController({
+      ...durableDependencies(),
       clock,
       credentialStore,
       instanceCoordinator: availableCoordinator(log),
@@ -79,6 +99,55 @@ describe('AckWatchController', () => {
     });
     controller.startMonitoring();
     expect(controller.getSnapshot().coverage.monitoring).toBe('armed');
+  });
+
+  it('projects normalized activity only after the durable workflow callback commits', async () => {
+    const credentialStore = new MemoryCredentials();
+    credentialStore.value = credentials;
+    let onNormalized: ((result: NormalizationResult) => Promise<void>) | undefined;
+    let emitAfterNormalized: (() => void) | undefined;
+    const controller = new AckWatchController({
+      ...durableDependencies(),
+      clock,
+      credentialStore,
+      instanceCoordinator: availableCoordinator([]),
+      createRuntime: (options) => {
+        onNormalized = options.onNormalized;
+        emitAfterNormalized = options.onChange;
+        return {
+          start: async () => {
+            options.coverage.beginStartup();
+            options.coverage.observeSync({ state: 'syncing', fromCache: false });
+          },
+          stop: async () => undefined,
+          logout: async () => undefined,
+          retryCoverageIssues: async () => undefined,
+        };
+      },
+    });
+    await controller.initialize();
+
+    await onNormalized?.({
+      kind: 'activity',
+      accountId: credentials.accountId,
+      eventId: '$durable',
+      roomId: '!room:example.test',
+      sender: '@sender:example.test',
+      eventType: 'm.room.message',
+      messageType: 'm.text',
+      preview: 'Durable work',
+      detectedAt: 50_000,
+      localSequence: 1,
+      provenance: 'live',
+      contentState: 'clear',
+      relationKind: 'independent',
+    });
+    emitAfterNormalized?.();
+
+    expect(controller.getSnapshot().queueItems).toEqual([
+      expect.objectContaining({ status: 'NEW', activityCount: 1 }),
+    ]);
+    await controller.teardown();
   });
 
   it('blocks a second instance before runtime/store construction', async () => {
@@ -110,6 +179,7 @@ describe('AckWatchController', () => {
       loginRequest,
     }));
     const controller = new AckWatchController({
+      ...durableDependencies(),
       clock,
       authentication,
       credentialStore,

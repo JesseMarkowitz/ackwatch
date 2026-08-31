@@ -107,15 +107,22 @@ async function login(username) {
   });
 }
 
-async function sendMessage(roomId, token, marker) {
+async function sendMessage(roomId, token, marker, content) {
   const transactionId = `${runId}-${marker}`;
   return await matrixRequest(
     `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(transactionId)}`,
     {
       method: 'PUT',
       token,
-      body: { msgtype: 'm.text', body: `Synthetic ${marker} ${runId}` },
+      body: content ?? { msgtype: 'm.text', body: `Synthetic ${marker} ${runId}` },
     },
+  );
+}
+
+async function redactEvent(roomId, token, eventId, marker) {
+  return await matrixRequest(
+    `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/redact/${encodeURIComponent(eventId)}/${encodeURIComponent(`${runId}-${marker}`)}`,
+    { method: 'PUT', token, body: { reason: 'Synthetic Phase 3 redaction' } },
   );
 }
 
@@ -251,6 +258,79 @@ async function main() {
   await page.locator(`[data-event-id="${accepted.event_id}"]`).waitFor({ timeout: 30_000 });
   manifest.assertions.push('post-arm-accepted-once');
 
+  const acceptedCard = page.locator(`[data-event-id="${accepted.event_id}"]`);
+  await acceptedCard.getByRole('button', { name: 'View details' }).click();
+  const detail = page.getByRole('dialog');
+  await page.screenshot({ path: resolve(artifactsDirectory, 'real-detail.png'), fullPage: true });
+  await detail.getByRole('button', { name: 'Acknowledge' }).click();
+  await detail.getByText('ACKNOWLEDGED', { exact: true }).waitFor();
+  manifest.assertions.push('view-and-acknowledge');
+  await detail.getByRole('button', { name: 'Close details' }).click();
+
+  const editedBody = `Edited synthetic activity ${runId}`;
+  const edit = await sendMessage(room.room_id, senderA.access_token, 'edit', {
+    msgtype: 'm.text',
+    body: `* ${editedBody}`,
+    'm.new_content': { msgtype: 'm.text', body: editedBody },
+    'm.relates_to': { rel_type: 'm.replace', event_id: accepted.event_id },
+  });
+  manifest.eventIds.edit = edit.event_id;
+  await page.getByText(editedBody, { exact: true }).waitFor({ timeout: 30_000 });
+  manifest.assertions.push('edit-updates-without-new-item');
+
+  const redaction = await redactEvent(
+    room.room_id,
+    senderA.access_token,
+    accepted.event_id,
+    'redact-root',
+  );
+  manifest.eventIds.redaction = redaction.event_id;
+  await page.getByText('Message removed', { exact: true }).waitFor({ timeout: 30_000 });
+  manifest.assertions.push('redaction-preserves-item');
+
+  const threadReply = await sendMessage(room.room_id, senderB.access_token, 'thread-reply', {
+    msgtype: 'm.text',
+    body: `Synthetic thread reply ${runId}`,
+    'm.relates_to': {
+      rel_type: 'm.thread',
+      event_id: accepted.event_id,
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: accepted.event_id },
+    },
+  });
+  manifest.eventIds.threadReply = threadReply.event_id;
+  const threadCard = page.locator(`[data-event-id="${threadReply.event_id}"]`);
+  await threadCard.waitFor({ timeout: 30_000 });
+  await threadCard.getByRole('button', { name: 'Review new activity' }).click();
+  await threadCard.getByRole('button', { name: 'Complete' }).click();
+  await page
+    .locator('.queue-column')
+    .filter({ has: page.getByRole('heading', { name: 'Completed history' }) })
+    .locator(`[data-event-id="${threadReply.event_id}"]`)
+    .waitFor({ timeout: 30_000 });
+  await page.screenshot({
+    path: resolve(artifactsDirectory, 'real-completed.png'),
+    fullPage: true,
+  });
+  manifest.assertions.push('thread-merge-review-complete');
+
+  const reopenedReply = await sendMessage(room.room_id, senderB.access_token, 'thread-reopen', {
+    msgtype: 'm.text',
+    body: `Synthetic reopen reply ${runId}`,
+    'm.relates_to': {
+      rel_type: 'm.thread',
+      event_id: accepted.event_id,
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: accepted.event_id },
+    },
+  });
+  manifest.eventIds.reopenedReply = reopenedReply.event_id;
+  const reopenedCard = page.locator(`[data-event-id="${reopenedReply.event_id}"]`);
+  await reopenedCard.waitFor({ timeout: 30_000 });
+  await reopenedCard.getByText('Needs attention', { exact: true }).waitFor();
+  await page.screenshot({ path: resolve(artifactsDirectory, 'real-reopened.png'), fullPage: true });
+  manifest.assertions.push('completed-thread-reopens-new-cycle');
+
   const selfEvent = await sendMessage(room.room_id, monitor.access_token, 'self-authored');
   manifest.eventIds.selfAuthored = selfEvent.event_id;
   await waitForProcessed(page, selfEvent.event_id);
@@ -279,6 +359,9 @@ async function main() {
   await page.getByRole('button', { name: 'Start monitoring' }).waitFor({ timeout: 45_000 });
   await page.getByText('Off', { exact: true }).first().waitFor();
   manifest.assertions.push('reload-unarmed');
+  await page.locator(`[data-event-id="${reopenedReply.event_id}"]`).waitFor({ timeout: 30_000 });
+  await page.locator(`[data-event-id="${rearmed.event_id}"]`).waitFor({ timeout: 30_000 });
+  manifest.assertions.push('reload-restores-workflow');
 
   const secondPage = await context.newPage();
   await loginInBrowser(secondPage, monitor.user_id, passwords.get('monitor'));

@@ -74,7 +74,7 @@ const requirements = {
 };
 
 if (!unit.success || unit.numFailedTests !== 0) throw new Error('Unit evidence is not passing.');
-if (browser.stats.unexpected !== 0 || browser.stats.expected !== 4) {
+if (browser.stats.unexpected !== 0 || browser.stats.expected < 4) {
   throw new Error('Browser evidence is incomplete.');
 }
 if (visual.stats.unexpected !== 0 || visual.stats.expected < 10 || missingScreenshots.length > 0) {

@@ -1,8 +1,9 @@
-import { type FormEvent, useMemo, useState, useSyncExternalStore } from 'react';
+import { type FormEvent, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import type { AckWatchControllerPort, AppSnapshot } from '../application/app-controller';
 import type { FoundationViewModel } from './view-model';
 import { signedOutView } from './view-model';
+import { matrixEventUri, type QueueActivity, type QueueItem } from '../domain/queue';
 
 interface AppProps {
   readonly controller?: AckWatchControllerPort;
@@ -32,6 +33,9 @@ function snapshotFromView(view: FoundationViewModel): AppSnapshot {
     activities: [],
     ingestionIssues: [],
     ingestionDecisions: [],
+    queueItems: [],
+    queueActivities: [],
+    storage: { available: true, persistenceSupported: false },
   };
 }
 
@@ -186,6 +190,278 @@ function LoginPanel({
   );
 }
 
+function itemActivity(
+  item: QueueItem,
+  activities: readonly QueueActivity[],
+): QueueActivity | undefined {
+  return activities.filter(({ itemId }) => itemId === item.id).at(-1);
+}
+
+function deadlineLabel(item: QueueItem): string {
+  if (!item.deadline) return 'No active deadline';
+  return `${item.deadline.kind === 'acknowledged' ? 'Pending-work' : 'Unacknowledged'} deadline ${new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(item.deadline.firstAt)}`;
+}
+
+function QueueCard({
+  item,
+  activities,
+  controller,
+  openDetails,
+}: {
+  readonly item: QueueItem;
+  readonly activities: readonly QueueActivity[];
+  readonly controller: AckWatchControllerPort | undefined;
+  readonly openDetails: (itemId: string) => void;
+}) {
+  const latest = itemActivity(item, activities);
+  return (
+    <article
+      className={`queue-card ${item.needsAttention ? 'queue-card--attention' : ''}`}
+      data-item-id={item.id}
+      data-event-id={latest?.eventId}
+    >
+      <div className="queue-card__meta">
+        <span>{latest?.roomName ?? item.roomId}</span>
+        <span>
+          {item.activityCount} activit{item.activityCount === 1 ? 'y' : 'ies'}
+        </span>
+      </div>
+      <h3>{latest?.sender ?? 'Matrix activity'}</h3>
+      <p>{latest?.preview ?? 'Detail is temporarily unavailable.'}</p>
+      <div className="queue-card__status">
+        <strong>{item.needsAttention ? 'Needs attention' : item.status}</strong>
+        <span>{deadlineLabel(item)}</span>
+      </div>
+      <div className="queue-card__actions">
+        <button type="button" onClick={() => openDetails(item.id)}>
+          View details
+        </button>
+        {item.status === 'ACKNOWLEDGED' && item.needsAttention ? (
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => void controller?.applyQueueCommand(item.id, 'review_new_activity')}
+          >
+            Review new activity
+          </button>
+        ) : null}
+        {item.status !== 'COMPLETED' ? (
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => void controller?.applyQueueCommand(item.id, 'complete')}
+          >
+            Complete
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => void controller?.applyQueueCommand(item.id, 'manual_reopen')}
+          >
+            Reopen
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function QueueSection({
+  title,
+  empty,
+  items,
+  activities,
+  controller,
+  openDetails,
+}: {
+  readonly title: string;
+  readonly empty: string;
+  readonly items: readonly QueueItem[];
+  readonly activities: readonly QueueActivity[];
+  readonly controller: AckWatchControllerPort | undefined;
+  readonly openDetails: (itemId: string) => void;
+}) {
+  return (
+    <section
+      className="queue-column"
+      aria-labelledby={`queue-${title.replaceAll(' ', '-').toLowerCase()}`}
+    >
+      <header>
+        <h2 id={`queue-${title.replaceAll(' ', '-').toLowerCase()}`}>{title}</h2>
+        <span aria-label={`${items.length} items`}>{items.length}</span>
+      </header>
+      {items.length === 0 ? (
+        <p className="queue-column__empty">{empty}</p>
+      ) : (
+        <div className="queue-column__items">
+          {items.map((item) => (
+            <QueueCard
+              key={item.id}
+              item={item}
+              activities={activities}
+              controller={controller}
+              openDetails={openDetails}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ItemDetail({
+  item,
+  activities,
+  controller,
+  close,
+}: {
+  readonly item: QueueItem;
+  readonly activities: readonly QueueActivity[];
+  readonly controller: AckWatchControllerPort | undefined;
+  readonly close: () => void;
+}) {
+  const panel = useRef<HTMLElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const latest = itemActivity(item, activities);
+  const itemActivities = activities.filter(({ itemId }) => itemId === item.id);
+  const uri = latest ? matrixEventUri(latest.roomId, latest.eventId) : undefined;
+  const [copyStatus, setCopyStatus] = useState('');
+
+  useEffect(() => {
+    closeButton.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+      if (event.key === 'Tab') {
+        const focusable = [
+          ...(panel.current?.querySelectorAll<HTMLElement>('button, a[href]') ?? []),
+        ];
+        const first = focusable[0];
+        const last = focusable.at(-1);
+        if (event.shiftKey && document.activeElement === first && last) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last && first) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [close]);
+
+  return (
+    <div className="detail-backdrop">
+      <section
+        ref={panel}
+        className="detail-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="detail-title"
+      >
+        <div className="detail-panel__header">
+          <div>
+            <p className="eyebrow">Queue item</p>
+            <h2 id="detail-title">{latest?.roomName ?? item.roomId}</h2>
+          </div>
+          <button ref={closeButton} type="button" className="button-secondary" onClick={close}>
+            Close details
+          </button>
+        </div>
+        <dl className="detail-facts">
+          <div>
+            <dt>Sender</dt>
+            <dd>{latest?.sender ?? 'Unavailable'}</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd>{item.status}</dd>
+          </div>
+          <div>
+            <dt>Detected</dt>
+            <dd>{new Date(latest?.detectedAt ?? item.firstDetectedAt).toLocaleString()}</dd>
+          </div>
+          <div>
+            <dt>Context</dt>
+            <dd>{latest?.relationKind ?? 'independent'}</dd>
+          </div>
+        </dl>
+        <div className="detail-message">
+          <p>
+            {latest?.preview ?? 'Full detail is temporarily unavailable from the Matrix client.'}
+          </p>
+          {latest ? (
+            <small>
+              {latest.messageType}
+              {latest.edited ? ' · edited' : ''}
+              {latest.redacted ? ' · redacted' : ''}
+            </small>
+          ) : null}
+        </div>
+        {itemActivities.length > 1 ? (
+          <ol className="detail-activity-list" aria-label="Item activity history">
+            {itemActivities.map((activity) => (
+              <li key={activity.id}>
+                <div>
+                  <strong>{activity.sender}</strong>
+                  <span>{activity.relationKind}</span>
+                </div>
+                <p>{activity.preview}</p>
+              </li>
+            ))}
+          </ol>
+        ) : null}
+        <div className="detail-actions">
+          {item.status === 'NEW' || item.status === 'UNACKNOWLEDGED' ? (
+            <button
+              type="button"
+              onClick={() => void controller?.applyQueueCommand(item.id, 'acknowledge')}
+            >
+              Acknowledge
+            </button>
+          ) : null}
+          {item.status !== 'COMPLETED' ? (
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => void controller?.applyQueueCommand(item.id, 'complete')}
+            >
+              Complete
+            </button>
+          ) : null}
+          {uri ? (
+            <a className="button-link" href={uri}>
+              Open in Matrix
+            </a>
+          ) : null}
+          {uri ? (
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => {
+                void navigator.clipboard?.writeText(uri).then(
+                  () => setCopyStatus('Matrix URI copied.'),
+                  () => setCopyStatus('Copy was blocked; select the URI from item diagnostics.'),
+                );
+              }}
+            >
+              Copy Matrix URI
+            </button>
+          ) : null}
+        </div>
+        <p className="field-help">
+          Matrix links require a locally installed client that handles the matrix: scheme. Link and
+          copy actions do not mark work viewed or acknowledged.
+        </p>
+        <p className="sr-status" aria-live="polite">
+          {copyStatus}
+        </p>
+      </section>
+    </div>
+  );
+}
+
 export function App({ controller, snapshot: suppliedSnapshot, view = signedOutView }: AppProps) {
   const fallbackSnapshot = useMemo(
     () => suppliedSnapshot ?? snapshotFromView(view),
@@ -205,6 +481,22 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
       )
     : 'Not yet confirmed';
   const lastProcessedEventId = snapshot.ingestionDecisions.at(-1)?.eventId;
+  const [selectedItemId, setSelectedItemId] = useState<string>();
+  const [settingsTransfer, setSettingsTransfer] = useState('');
+  const [settingsStatus, setSettingsStatus] = useState('');
+  const selectedItem = snapshot.queueItems.find(({ id }) => id === selectedItemId);
+  const attentionItems = snapshot.queueItems.filter(
+    (item) => item.status !== 'COMPLETED' && item.needsAttention,
+  );
+  const openItems = snapshot.queueItems.filter(
+    (item) => item.status !== 'COMPLETED' && !item.needsAttention,
+  );
+  const completedItems = snapshot.queueItems.filter((item) => item.status === 'COMPLETED');
+  const openDetails = (itemId: string) => {
+    const item = snapshot.queueItems.find(({ id }) => id === itemId);
+    setSelectedItemId(itemId);
+    if (item?.status === 'NEW') void controller?.applyQueueCommand(itemId, 'mark_viewed');
+  };
 
   return (
     <div className="app-shell">
@@ -254,15 +546,60 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
             <dt>Last confirmed</dt>
             <dd className="health-grid__time">{lastConfirmed}</dd>
           </div>
+          <div>
+            <dt>Storage</dt>
+            <dd>
+              <HealthPill
+                label={snapshot.storage.persistent ? 'Persistent' : 'Best effort'}
+                tone={
+                  snapshot.storage.fault
+                    ? 'danger'
+                    : snapshot.storage.persistent
+                      ? 'healthy'
+                      : 'warning'
+                }
+              />
+            </dd>
+          </div>
+          <div>
+            <dt>Audio</dt>
+            <dd>
+              <HealthPill
+                label={snapshot.settings?.audioEnabled ? 'Enabled' : 'Disabled'}
+                tone="neutral"
+              />
+            </dd>
+          </div>
+          <div>
+            <dt>Notifications</dt>
+            <dd>
+              <HealthPill
+                label={snapshot.settings?.browserNotificationsEnabled ? 'Enabled' : 'Disabled'}
+                tone="neutral"
+              />
+            </dd>
+          </div>
+          <div>
+            <dt>Webhook</dt>
+            <dd>
+              <HealthPill
+                label={snapshot.settings?.webhookEnabled ? 'Configured' : 'Disabled'}
+                tone="neutral"
+              />
+            </dd>
+          </div>
         </dl>
       </section>
 
-      {snapshot.error || snapshot.coverage.fault || snapshot.phase === 'blocked' ? (
+      {snapshot.error ||
+      snapshot.coverage.fault ||
+      snapshot.storage.fault ||
+      snapshot.phase === 'blocked' ? (
         <section className="fault-banner" role="alert">
           <strong>
             {snapshot.phase === 'blocked' ? 'Account already open' : 'Coverage needs attention'}
           </strong>
-          <span>{snapshot.error ?? snapshot.coverage.fault}</span>
+          <span>{snapshot.error ?? snapshot.coverage.fault ?? snapshot.storage.fault}</span>
           {snapshot.coverage.connection === 'coverage_incomplete' ? (
             <button type="button" onClick={() => void controller?.retryCoverage()}>
               Retry recovery
@@ -368,40 +705,124 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
         </section>
 
         <section
-          className="queue-preview"
-          aria-labelledby="queue-heading"
+          className="queue-preview workflow-board"
+          aria-labelledby="workflow-heading"
           data-last-processed-event-id={lastProcessedEventId}
         >
-          <div>
-            <p className="eyebrow">Developer event ledger</p>
-            <h2 id="queue-heading">
-              {snapshot.activities.length === 0
-                ? 'Nothing needs attention'
-                : `${snapshot.activities.length} captured event${snapshot.activities.length === 1 ? '' : 's'}`}
-            </h2>
-          </div>
-          {snapshot.activities.length === 0 ? (
-            <p>
-              {healthy
-                ? 'Coverage is healthy. New qualifying activity will appear here.'
-                : 'Only live external activity delivered during an armed session is eligible.'}
+          <header className="workflow-board__heading">
+            <div>
+              <p className="eyebrow">Durable workflow</p>
+              <h2 id="workflow-heading">Attention queue</h2>
+            </div>
+            <p aria-live="polite">
+              {snapshot.queueItems.length === 0
+                ? healthy
+                  ? 'Coverage is healthy. New qualifying activity will appear here.'
+                  : 'Arm monitoring after the network baseline to accept new work.'
+                : `${attentionItems.length} need attention · ${openItems.length} open · ${completedItems.length} completed`}
             </p>
-          ) : (
-            <ol className="event-ledger" aria-label="Captured Matrix events">
-              {snapshot.activities.map((activity) => (
-                <li key={activity.eventId} data-event-id={activity.eventId}>
-                  <div>
-                    <strong>{activity.roomName ?? activity.roomId}</strong>
-                    <span>{activity.sender}</span>
-                  </div>
-                  <p>{activity.preview || activity.messageType}</p>
-                  <code>{activity.eventId}</code>
-                </li>
-              ))}
-            </ol>
-          )}
+          </header>
+          <div className="workflow-columns">
+            <QueueSection
+              title="Needs attention"
+              empty="No unseen or reopened work."
+              items={attentionItems}
+              activities={snapshot.queueActivities}
+              controller={controller}
+              openDetails={openDetails}
+            />
+            <QueueSection
+              title="Open work"
+              empty="Viewed and acknowledged work appears here."
+              items={openItems}
+              activities={snapshot.queueActivities}
+              controller={controller}
+              openDetails={openDetails}
+            />
+            <QueueSection
+              title="Completed history"
+              empty="Completed work remains here until explicit cleanup."
+              items={completedItems}
+              activities={snapshot.queueActivities}
+              controller={controller}
+              openDetails={openDetails}
+            />
+          </div>
         </section>
+
+        {isSignedIn ? (
+          <section className="storage-card" aria-labelledby="storage-heading">
+            <div>
+              <p className="eyebrow">Local durability</p>
+              <h2 id="storage-heading">
+                {snapshot.storage.persistent
+                  ? 'Persistent local storage enabled'
+                  : 'Reduce browser eviction risk'}
+              </h2>
+              <p>
+                Your queue is stored locally in IndexedDB. Browser storage is not a confidentiality
+                boundary and can still be cleared explicitly.
+              </p>
+            </div>
+            <div className="storage-card__actions">
+              {snapshot.storage.persistenceSupported && !snapshot.storage.persistent ? (
+                <button type="button" onClick={() => void controller?.requestPersistentStorage()}>
+                  Request persistent storage
+                </button>
+              ) : null}
+              <details>
+                <summary>Settings export/import</summary>
+                <label htmlFor="settings-transfer">Settings JSON</label>
+                <textarea
+                  id="settings-transfer"
+                  value={settingsTransfer}
+                  onChange={(event) => setSettingsTransfer(event.target.value)}
+                  rows={5}
+                />
+                <div>
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={() => {
+                      void controller?.exportSettings().then((value) => {
+                        if (value) setSettingsTransfer(value);
+                        setSettingsStatus(
+                          value ? 'Settings prepared for copy.' : 'No settings available.',
+                        );
+                      });
+                    }}
+                  >
+                    Export settings
+                  </button>
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    disabled={!settingsTransfer}
+                    onClick={() => {
+                      void controller?.importSettings(settingsTransfer).then(
+                        () => setSettingsStatus('Settings imported.'),
+                        () => setSettingsStatus('Settings import failed validation.'),
+                      );
+                    }}
+                  >
+                    Import settings
+                  </button>
+                </div>
+                <p aria-live="polite">{settingsStatus}</p>
+              </details>
+            </div>
+          </section>
+        ) : null}
       </main>
+
+      {selectedItem ? (
+        <ItemDetail
+          item={selectedItem}
+          activities={snapshot.queueActivities}
+          controller={controller}
+          close={() => setSelectedItemId(undefined)}
+        />
+      ) : null}
 
       <footer>
         <p>Independent open-source software. Not endorsed by The Matrix.org Foundation.</p>

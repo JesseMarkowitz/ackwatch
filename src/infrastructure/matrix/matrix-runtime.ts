@@ -18,7 +18,12 @@ import type { CredentialStore, MatrixSessionCredentials } from '../../applicatio
 import { SerialIngestion } from '../../application/serial-ingestion';
 import type { Clock } from '../../domain/clock';
 import type { CoverageMachine, SyncObservation } from '../../domain/coverage';
-import type { DeveloperLedger, IngestionEnvelope, RawMatrixEvent } from '../../domain/ingestion';
+import type {
+  DeveloperLedger,
+  IngestionEnvelope,
+  NormalizationResult,
+  RawMatrixEvent,
+} from '../../domain/ingestion';
 import type { CoverageIssueRepository } from '../persistence/coverage-issue-repository';
 import { matrixErrorCode } from './authentication';
 
@@ -37,6 +42,7 @@ export interface MatrixRuntimeDependencies {
   readonly issues: CoverageIssueRepository;
   readonly ledger: DeveloperLedger;
   readonly onChange: () => void;
+  readonly onNormalized?: (result: NormalizationResult) => Promise<void>;
   readonly indexedDB?: IDBFactory;
   readonly localStorage?: Storage;
   readonly fetchFn?: typeof globalThis.fetch;
@@ -62,6 +68,7 @@ function rawEvent(event: MatrixEvent, room: Room | undefined): RawMatrixEvent {
     type: event.getType(),
     originServerTs: event.getTs(),
     content: event.getContent(),
+    ...(event.event.redacts === undefined ? {} : { redacts: event.event.redacts }),
   };
 }
 
@@ -80,6 +87,7 @@ export class MatrixRuntime {
       dependencies.coverage,
       dependencies.ledger,
       dependencies.onChange,
+      dependencies.onNormalized,
     );
     this.gapRecovery = new GapRecoveryCoordinator(dependencies.coverage, (envelope) => {
       this.ingestion.enqueue({ ...envelope, localSequence: ++this.sequence });

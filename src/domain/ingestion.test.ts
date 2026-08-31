@@ -76,6 +76,74 @@ describe('normalization', () => {
       ),
     ).toMatchObject({ kind: 'issue', code: 'encrypted_not_enabled' });
   });
+
+  it('classifies stable threads separately from ordinary replies', () => {
+    expect(
+      normalizeEnvelope(
+        envelope({
+          event: {
+            ...envelope().event,
+            content: {
+              msgtype: 'm.text',
+              body: 'thread reply',
+              'm.relates_to': { rel_type: 'm.thread', event_id: '$root' },
+            },
+          },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({ kind: 'activity', relationKind: 'thread', relationEventId: '$root' });
+    expect(
+      normalizeEnvelope(
+        envelope({
+          event: {
+            ...envelope().event,
+            content: {
+              msgtype: 'm.text',
+              body: 'ordinary reply',
+              'm.relates_to': { 'm.in_reply_to': { event_id: '$parent' } },
+            },
+          },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({ kind: 'activity', relationKind: 'reply', relationEventId: '$parent' });
+  });
+
+  it('accepts edits and redactions as maintenance while monitoring is off', () => {
+    expect(
+      normalizeEnvelope(
+        envelope({
+          eligibleAtDelivery: false,
+          event: {
+            ...envelope().event,
+            eventId: '$edit',
+            content: {
+              msgtype: 'm.text',
+              body: '* edited',
+              'm.new_content': { msgtype: 'm.text', body: 'edited' },
+              'm.relates_to': { rel_type: 'm.replace', event_id: '$event' },
+            },
+          },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({ kind: 'maintenance', mutation: 'edit', targetEventId: '$event' });
+    expect(
+      normalizeEnvelope(
+        envelope({
+          eligibleAtDelivery: false,
+          event: {
+            ...envelope().event,
+            eventId: '$redaction',
+            type: 'm.room.redaction',
+            redacts: '$event',
+          },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({ kind: 'maintenance', mutation: 'redaction', targetEventId: '$event' });
+  });
 });
 
 describe('SerialIngestion', () => {

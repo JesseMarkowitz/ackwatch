@@ -1,9 +1,10 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import axe from 'axe-core';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './App';
+import type { AckWatchControllerPort, AppSnapshot } from '../application/app-controller';
 
 afterEach(cleanup);
 
@@ -26,5 +27,93 @@ describe('foundation shell', () => {
     const result = await axe.run(container);
 
     expect(result.violations).toEqual([]);
+  });
+
+  it('uses domain commands for details/actions and keeps Matrix link actions state-neutral', async () => {
+    const applyQueueCommand = vi.fn(async () => undefined);
+    const snapshot: AppSnapshot = {
+      phase: 'active',
+      accountLabel: '@operator:example.test',
+      homeserverLabel: 'https://example.test',
+      coverage: {
+        connection: 'ready',
+        monitoring: 'armed',
+        networkBaselineConfirmed: true,
+        ingestionPending: 0,
+        openGapCount: 0,
+      },
+      activities: [],
+      ingestionIssues: [],
+      ingestionDecisions: [],
+      storage: { available: true, persistenceSupported: false },
+      queueItems: [
+        {
+          id: 'item-a',
+          accountId: '@operator:example.test|https://example.test',
+          conversationKey: 'event:!room:example.test:$event',
+          roomId: '!room:example.test',
+          cycleId: 'cycle-a',
+          status: 'NEW',
+          activityCount: 1,
+          unseenActivityCount: 1,
+          needsAttention: true,
+          firstDetectedAt: 1_000,
+          lastActivityAt: 1_000,
+          createdAt: 1_000,
+          updatedAt: 1_000,
+          reopenedCount: 0,
+          deadline: { kind: 'unacknowledged', firstAt: 301_000, repeatEveryMs: 300_000 },
+        },
+      ],
+      queueActivities: [
+        {
+          id: 'activity-a',
+          accountId: '@operator:example.test|https://example.test',
+          eventId: '$event',
+          itemId: 'item-a',
+          roomId: '!room:example.test',
+          sender: '@sender:example.test',
+          eventType: 'm.room.message',
+          messageType: 'm.text',
+          preview: '<b>rendered as text</b>',
+          detectedAt: 1_000,
+          localSequence: 1,
+          provenance: 'live',
+          contentState: 'clear',
+          edited: false,
+          redacted: false,
+          relationKind: 'independent',
+        },
+      ],
+    };
+    const controller: AckWatchControllerPort = {
+      getSnapshot: () => snapshot,
+      subscribe: () => () => undefined,
+      initialize: async () => undefined,
+      prepareLogin: async () => undefined,
+      login: async () => undefined,
+      startMonitoring: () => undefined,
+      stopMonitoring: () => undefined,
+      retryCoverage: async () => undefined,
+      applyQueueCommand,
+      requestPersistentStorage: async () => undefined,
+      exportSettings: async () => undefined,
+      importSettings: async () => undefined,
+      logout: async () => undefined,
+    };
+    const user = userEvent.setup();
+    const { container } = render(<App controller={controller} />);
+
+    expect(container.querySelector('b')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'View details' }));
+    expect(applyQueueCommand).toHaveBeenCalledTimes(1);
+    expect(applyQueueCommand).toHaveBeenLastCalledWith('item-a', 'mark_viewed');
+    expect(screen.getByRole('link', { name: 'Open in Matrix' })).toHaveAttribute(
+      'href',
+      'matrix:roomid/room%3Aexample.test/e/event',
+    );
+    await user.click(screen.getByRole('button', { name: 'Copy Matrix URI' }));
+    expect(applyQueueCommand).toHaveBeenCalledTimes(1);
+    expect((await axe.run(container)).violations).toEqual([]);
   });
 });

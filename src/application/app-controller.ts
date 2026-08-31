@@ -10,13 +10,26 @@ import {
   DeveloperLedger,
   type IngestionDecision,
   type IngestionIssue,
+  type NormalizationResult,
   type SupportedActivity,
 } from '../domain/ingestion';
+import type { QueueActivity, QueueCommand, QueueItem } from '../domain/queue';
+import {
+  BrowserStorageHealth,
+  type BrowserStorageSnapshot,
+} from '../infrastructure/browser/storage-health';
 import { WebLockCoordinator } from '../infrastructure/browser/web-lock-coordinator';
 import { SessionCredentialStore } from '../infrastructure/browser/session-credential-store';
 import { MatrixAuthentication, type PreparedLogin } from '../infrastructure/matrix/authentication';
 import { MatrixRuntime } from '../infrastructure/matrix/matrix-runtime';
 import { CoverageIssueRepository } from '../infrastructure/persistence/coverage-issue-repository';
+import {
+  WorkflowRepository,
+  type AcceptedActivityInput,
+  type StorageHealth,
+  type WorkflowProjection,
+} from '../infrastructure/persistence/workflow-repository';
+import type { AccountSettingsRecord } from '../infrastructure/persistence/workflow-database';
 
 export type AppPhase =
   'signed_out' | 'discovering' | 'password' | 'connecting' | 'active' | 'blocked' | 'error';
@@ -30,6 +43,10 @@ export interface AppSnapshot {
   readonly activities: readonly SupportedActivity[];
   readonly ingestionIssues: readonly IngestionIssue[];
   readonly ingestionDecisions: readonly IngestionDecision[];
+  readonly queueItems: readonly QueueItem[];
+  readonly queueActivities: readonly QueueActivity[];
+  readonly storage: BrowserStorageSnapshot;
+  readonly settings?: AccountSettingsRecord;
   readonly error?: string;
 }
 
@@ -42,6 +59,10 @@ export interface AckWatchControllerPort {
   startMonitoring(): void;
   stopMonitoring(): void;
   retryCoverage(): Promise<void>;
+  applyQueueCommand(itemId: string, command: QueueCommand['kind']): Promise<void>;
+  requestPersistentStorage(): Promise<void>;
+  exportSettings(): Promise<string | undefined>;
+  importSettings(serialized: string): Promise<void>;
   logout(): Promise<void>;
 }
 
@@ -54,6 +75,38 @@ export interface AppControllerDependencies {
   readonly createRuntime?: (
     options: ConstructorParameters<typeof MatrixRuntime>[0],
   ) => MatrixRuntimePort;
+  readonly storageHealth?: BrowserStorageHealthPort;
+  readonly createWorkflowRepository?: (
+    onStorageHealth: (health: StorageHealth) => void,
+  ) => WorkflowRepositoryPort;
+}
+
+export interface BrowserStorageHealthPort {
+  inspect(): Promise<BrowserStorageSnapshot>;
+  requestPersistence(): Promise<BrowserStorageSnapshot>;
+}
+
+export interface WorkflowRepositoryPort {
+  open(): Promise<void>;
+  acceptActivity(input: AcceptedActivityInput): Promise<unknown>;
+  applyMaintenance(
+    accountId: string,
+    targetEventId: string,
+    command:
+      | { readonly kind: 'apply_edit'; readonly preview: string }
+      | { readonly kind: 'apply_redaction' },
+  ): Promise<boolean>;
+  recordIngestionIssue(
+    issue: Parameters<WorkflowRepository['recordIngestionIssue']>[0],
+  ): Promise<void>;
+  beginMonitoringSession(accountId: string, sessionId: string, startedAt: number): Promise<void>;
+  endMonitoringSession(sessionId: string, stoppedAt: number, stopReason: string): Promise<void>;
+  applyCommand(accountId: string, itemId: string, command: QueueCommand): Promise<void>;
+  projection(accountId: string): Promise<WorkflowProjection>;
+  getSettings(accountId: string): Promise<AccountSettingsRecord>;
+  exportSettings(accountId: string): Promise<string>;
+  importSettings(accountId: string, serialized: string): Promise<AccountSettingsRecord>;
+  close(): void;
 }
 
 export interface MatrixRuntimePort {
@@ -73,14 +126,32 @@ export class AckWatchController implements AckWatchControllerPort {
   private readonly createRuntime: (
     options: ConstructorParameters<typeof MatrixRuntime>[0],
   ) => MatrixRuntimePort;
+  private readonly storageHealth: BrowserStorageHealthPort;
+  private readonly createWorkflowRepository: (
+    onStorageHealth: (health: StorageHealth) => void,
+  ) => WorkflowRepositoryPort;
   private readonly ledger = new DeveloperLedger();
   private readonly listeners = new Set<() => void>();
   private phase: AppPhase = 'signed_out';
   private preparedLogin: PreparedLogin | undefined;
   private credentials: MatrixSessionCredentials | undefined;
   private runtime: MatrixRuntimePort | undefined;
+  private workflow: WorkflowRepositoryPort | undefined;
   private lease: InstanceLease | undefined;
   private error: string | undefined;
+  private workflowProjection: WorkflowProjection = {
+    items: [],
+    activities: [],
+    transitions: [],
+    effects: [],
+    quarantineCount: 0,
+  };
+  private storageSnapshot: BrowserStorageSnapshot = {
+    available: true,
+    persistenceSupported: false,
+  };
+  private accountSettings: AccountSettingsRecord | undefined;
+  private monitoringSessionId: string | undefined;
   private currentSnapshot: AppSnapshot;
 
   public constructor(dependencies: AppControllerDependencies = {}) {
@@ -97,6 +168,11 @@ export class AckWatchController implements AckWatchControllerPort {
     this.createIssueRepository =
       dependencies.createIssueRepository ?? (() => new CoverageIssueRepository());
     this.createRuntime = dependencies.createRuntime ?? ((options) => new MatrixRuntime(options));
+    this.storageHealth = dependencies.storageHealth ?? new BrowserStorageHealth();
+    this.createWorkflowRepository =
+      dependencies.createWorkflowRepository ??
+      ((onStorageHealth) =>
+        new WorkflowRepository('ackwatch-workflow', undefined, undefined, onStorageHealth));
     this.currentSnapshot = this.buildSnapshot();
   }
 
@@ -154,6 +230,11 @@ export class AckWatchController implements AckWatchControllerPort {
     try {
       this.coverage.startMonitoring();
       this.error = undefined;
+      const sessionId = crypto.randomUUID();
+      this.monitoringSessionId = sessionId;
+      void this.workflow
+        ?.beginMonitoringSession(this.credentials?.accountId ?? '', sessionId, this.clock.now())
+        .catch((error: unknown) => this.handleWorkflowFailure(error));
     } catch (error: unknown) {
       this.error = error instanceof Error ? error.message : 'Monitoring could not start.';
     }
@@ -162,6 +243,39 @@ export class AckWatchController implements AckWatchControllerPort {
 
   public stopMonitoring(): void {
     this.coverage.stopMonitoring();
+    void this.endMonitoringSession('user_stop');
+    this.emit();
+  }
+
+  public async applyQueueCommand(itemId: string, kind: QueueCommand['kind']): Promise<void> {
+    const accountId = this.credentials?.accountId;
+    if (!accountId || !this.workflow) return;
+    const at = this.clock.now();
+    const command: QueueCommand =
+      kind === 'manual_reopen' ? { kind, at, cycleId: crypto.randomUUID() } : { kind, at };
+    try {
+      await this.workflow.applyCommand(accountId, itemId, command);
+      await this.refreshWorkflow();
+    } catch (error: unknown) {
+      this.error = error instanceof Error ? error.message : 'Workflow command failed.';
+    }
+    this.emit();
+  }
+
+  public async requestPersistentStorage(): Promise<void> {
+    this.storageSnapshot = await this.storageHealth.requestPersistence();
+    this.emit();
+  }
+
+  public async exportSettings(): Promise<string | undefined> {
+    const accountId = this.credentials?.accountId;
+    return accountId && this.workflow ? await this.workflow.exportSettings(accountId) : undefined;
+  }
+
+  public async importSettings(serialized: string): Promise<void> {
+    const accountId = this.credentials?.accountId;
+    if (!accountId || !this.workflow) return;
+    this.accountSettings = await this.workflow.importSettings(accountId, serialized);
     this.emit();
   }
 
@@ -178,16 +292,27 @@ export class AckWatchController implements AckWatchControllerPort {
 
   public async logout(): Promise<void> {
     this.coverage.stopMonitoring();
+    await this.endMonitoringSession('logout');
     try {
       await this.runtime?.logout();
     } finally {
       await this.credentialStore.clear();
       await this.lease?.release();
       this.runtime = undefined;
+      this.workflow?.close();
+      this.workflow = undefined;
       this.lease = undefined;
       this.credentials = undefined;
       this.preparedLogin = undefined;
       this.error = undefined;
+      this.workflowProjection = {
+        items: [],
+        activities: [],
+        transitions: [],
+        effects: [],
+        quarantineCount: 0,
+      };
+      this.accountSettings = undefined;
       this.phase = 'signed_out';
       this.coverage.signOut();
       this.emit();
@@ -196,7 +321,9 @@ export class AckWatchController implements AckWatchControllerPort {
 
   public async teardown(): Promise<void> {
     this.coverage.stopMonitoring();
+    await this.endMonitoringSession('page_teardown');
     await this.runtime?.stop();
+    this.workflow?.close();
     await this.lease?.release();
   }
 
@@ -214,6 +341,20 @@ export class AckWatchController implements AckWatchControllerPort {
     this.lease = lease;
 
     try {
+      this.storageSnapshot = await this.storageHealth.inspect();
+      if (!this.storageSnapshot.available) {
+        throw new Error(this.storageSnapshot.fault ?? 'Durable browser storage is unavailable.');
+      }
+      const workflow = this.createWorkflowRepository((health) => {
+        if (health.state === 'healthy') return;
+        this.storageSnapshot = { ...this.storageSnapshot, fault: health.detail };
+        this.coverage.fatal(health.detail);
+        this.emit();
+      });
+      this.workflow = workflow;
+      await workflow.open();
+      this.workflowProjection = await workflow.projection(credentials.accountId);
+      this.accountSettings = await workflow.getSettings(credentials.accountId);
       const runtime = this.createRuntime({
         clock: this.clock,
         coverage: this.coverage,
@@ -222,6 +363,7 @@ export class AckWatchController implements AckWatchControllerPort {
         issues: this.createIssueRepository(),
         ledger: this.ledger,
         onChange: () => this.emit(),
+        onNormalized: async (result) => this.handleNormalized(result),
       });
       this.runtime = runtime;
       this.phase = 'active';
@@ -231,6 +373,8 @@ export class AckWatchController implements AckWatchControllerPort {
       await lease.release();
       this.lease = undefined;
       this.runtime = undefined;
+      this.workflow?.close();
+      this.workflow = undefined;
       this.phase = 'error';
       this.coverage.fatal(
         error instanceof Error ? error.message : 'Matrix client startup failed safely.',
@@ -238,6 +382,82 @@ export class AckWatchController implements AckWatchControllerPort {
       this.error = this.coverage.snapshot().fault ?? 'Matrix client startup failed safely.';
       this.emit();
     }
+  }
+
+  private async handleNormalized(result: NormalizationResult): Promise<void> {
+    const workflow = this.workflow;
+    const accountId = this.credentials?.accountId;
+    if (!workflow || !accountId) throw new Error('Workflow storage is unavailable.');
+    if (result.kind === 'activity') {
+      await workflow.acceptActivity({
+        accountId: result.accountId,
+        eventId: result.eventId,
+        roomId: result.roomId,
+        sender: result.sender,
+        eventType: result.eventType,
+        messageType: result.messageType,
+        preview: result.preview,
+        detectedAt: result.detectedAt,
+        localSequence: result.localSequence,
+        provenance: result.provenance,
+        contentState: result.contentState,
+        relationKind: result.relationKind,
+        ...(result.relationEventId === undefined
+          ? {}
+          : { relationEventId: result.relationEventId }),
+        ...(result.roomName === undefined ? {} : { roomName: result.roomName }),
+      });
+      await this.refreshWorkflow();
+      return;
+    }
+    if (result.kind === 'maintenance') {
+      await workflow.applyMaintenance(
+        accountId,
+        result.targetEventId,
+        result.mutation === 'edit'
+          ? { kind: 'apply_edit', preview: result.preview ?? '' }
+          : { kind: 'apply_redaction' },
+      );
+      await this.refreshWorkflow();
+      return;
+    }
+    if (result.kind === 'issue') {
+      await workflow.recordIngestionIssue({
+        accountId,
+        code: result.code,
+        detail: result.detail,
+        detectedAt: result.detectedAt,
+        ...(result.eventId === undefined ? {} : { eventId: result.eventId }),
+        ...(result.roomId === undefined ? {} : { roomId: result.roomId }),
+      });
+    }
+  }
+
+  private async refreshWorkflow(): Promise<void> {
+    const accountId = this.credentials?.accountId;
+    if (accountId && this.workflow) {
+      this.workflowProjection = await this.workflow.projection(accountId);
+    }
+  }
+
+  private async endMonitoringSession(reason: string): Promise<void> {
+    const sessionId = this.monitoringSessionId;
+    this.monitoringSessionId = undefined;
+    if (sessionId && this.workflow) {
+      try {
+        await this.workflow.endMonitoringSession(sessionId, this.clock.now(), reason);
+      } catch (error: unknown) {
+        this.handleWorkflowFailure(error);
+      }
+    }
+  }
+
+  private handleWorkflowFailure(error: unknown): void {
+    const detail = error instanceof Error ? error.message : 'Workflow persistence failed.';
+    this.storageSnapshot = { ...this.storageSnapshot, fault: detail };
+    this.coverage.fatal(detail);
+    this.error = detail;
+    this.emit();
   }
 
   private emit(): void {
@@ -257,6 +477,10 @@ export class AckWatchController implements AckWatchControllerPort {
       activities: ledger.activities,
       ingestionIssues: ledger.issues,
       ingestionDecisions: ledger.decisions,
+      queueItems: this.workflowProjection.items,
+      queueActivities: this.workflowProjection.activities,
+      storage: this.storageSnapshot,
+      ...(this.accountSettings === undefined ? {} : { settings: this.accountSettings }),
       ...(this.error === undefined ? {} : { error: this.error }),
     };
   }
