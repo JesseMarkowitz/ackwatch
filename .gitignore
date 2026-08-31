@@ -1,0 +1,33 @@
+# Dependencies and package-manager state
+node_modules/
+.npm/
+.cache/
+
+# Build and test output
+dist/
+dist-catalog/
+coverage/
+artifacts/
+playwright-report/
+test-results/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.test.example
+
+# Matrix SDK and integration-test state
+.matrix-test-state/
+.matrix-sdk-store/
+.matrix-crypto-store/
+.webhook-test-state/
+
+# Research material is never part of the product repository
+.research-sources/
+
+# Editor and operating-system noise
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

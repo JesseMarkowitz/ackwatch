@@ -1,0 +1,12 @@
+dist/
+dist-catalog/
+artifacts/
+coverage/
+node_modules/
+.cache/
+package-lock.json
+
+# Approved planning records are preserved verbatim.
+docs/IMPLEMENTATION_PLAN.md
+docs/RESEARCH_AND_DESIGN_REVIEW.md
+docs/SPECIFICATION.md
