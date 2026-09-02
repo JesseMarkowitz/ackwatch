@@ -11,6 +11,12 @@ secret storage, key backup, and emoji device verification — the complete V1 ev
 durable alert delivery through bundled audio, browser notifications, and an optional generic or
 ntfy-compatible webhook. Monitoring still returns off after every reload.
 
+AckWatch monitors for a working session rather than tracking indefinitely. A session holds the
+queue you are working through and survives a reload or a crash: returning within the continuity
+window (12 hours by default, configurable) offers the interrupted session back with your
+acknowledgements intact, while an older one is archived to a redacted summary and replaced. Ending
+a session archives it the same way and clears its work, leaving your configuration alone.
+
 ## Requirements
 
 - Node.js `22.23.1`
@@ -42,6 +48,7 @@ npm run test:browser
 npm run test:visual
 npm run test:matrix:local
 npm run test:webhook:local
+npm run test:scale
 npm run audit:secrets
 npm run audit:tracked
 npm run audit:dependencies

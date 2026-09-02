@@ -10,6 +10,10 @@
   boundary assertions, cleanup, and teardown.
 - `npm run test:matrix:remote`: explicitly records a skip when optional credentials are absent.
 - `npm run test:webhook:local`: pinned self-hosted ntfy contract and redacted manifest.
+- `npm run test:scale`: drives the real repository against real IndexedDB in Chromium at ten
+  thousand activities, publishing a growth curve to `artifacts/reports/scale-summary.json`. The
+  ladder and item count are overridable through `ACKWATCH_SCALE_LADDER` and `ACKWATCH_SCALE_ITEMS`.
+  Checkpoints are written as they land, so an overrunning run still yields its measurements.
 - `npm run check:gate1`: the complete Phase 1 gate, including audits and reports.
 - `npm run check:gate2`: the complete Phase 2 gate and evidence report.
 - `npm run check:gate3`: the complete Phase 3 workflow gate, including native IndexedDB,

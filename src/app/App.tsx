@@ -23,6 +23,7 @@ function snapshotFromView(view: FoundationViewModel): AppSnapshot {
   return {
     phase: view.isSignedIn ? 'active' : 'signed_out',
     accountLabel: view.accountLabel,
+    session: { state: 'none', continuityWindowMs: 12 * 60 * 60_000 },
     ...(view.isSignedIn ? { homeserverLabel: 'https://example.test' } : {}),
     coverage: {
       connection,
@@ -1066,6 +1067,40 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
         </dl>
       </section>
 
+      {snapshot.session.state === 'interrupted' ? (
+        <section
+          className="session-prompt"
+          role="alertdialog"
+          aria-labelledby="session-prompt-title"
+        >
+          <strong id="session-prompt-title">Interrupted session found</strong>
+          <span>
+            A session started {new Date(snapshot.session.startedAt ?? 0).toLocaleString()} is still
+            open. Continue it to keep the work you had acknowledged, or start fresh. Nothing is
+            alerted on until you choose, and monitoring stays off either way.
+          </span>
+          <div className="session-prompt__actions">
+            <button type="button" onClick={() => void controller?.continueInterruptedSession()}>
+              Continue session
+            </button>
+            <button
+              className="button-secondary"
+              type="button"
+              onClick={() => void controller?.startNewSession()}
+            >
+              Start new session
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {snapshot.session.notice ? (
+        <section className="session-notice" role="status">
+          <strong>Previous session archived</strong>
+          <span>{snapshot.session.notice}</span>
+        </section>
+      ) : null}
+
       {snapshot.error ||
       snapshot.coverage.fault ||
       snapshot.storage.fault ||
@@ -1151,6 +1186,15 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
                     {snapshot.coverage.monitoring === 'armed'
                       ? 'Stop monitoring'
                       : 'Start monitoring'}
+                  </button>
+                ) : null}
+                {snapshot.phase !== 'blocked' && snapshot.session.state === 'active' ? (
+                  <button
+                    className="button-secondary"
+                    type="button"
+                    onClick={() => void controller?.endSession()}
+                  >
+                    End session
                   </button>
                 ) : null}
               </section>

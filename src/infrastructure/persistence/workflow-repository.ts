@@ -19,6 +19,7 @@ import {
   type WorkflowTransition,
 } from '../../domain/queue';
 import {
+  defaultSessionContinuityWindowMs,
   WorkflowDatabase,
   type AlertAttemptRecord,
   type AlertDeliveryRecord,
@@ -27,6 +28,7 @@ import {
   type ConversationRecord,
   type QuarantinedRecord,
   type PersistedIngestionIssueRecord,
+  type WorkSessionRecord,
 } from './workflow-database';
 
 const deadlineSchema = z.object({
@@ -144,6 +146,32 @@ const attemptSchema: z.ZodType<AlertAttemptRecord> = z.object({
 });
 const settingsSchema: z.ZodType<AccountSettingsRecord> = z.object({
   accountId: z.string().min(1),
+  schemaVersion: z.literal(3),
+  unacknowledgedAfterMs: z.number().int().positive(),
+  unacknowledgedRepeatMs: z.number().int().positive(),
+  acknowledgedAfterMs: z.number().int().positive(),
+  acknowledgedRepeatMs: z.number().int().positive(),
+  diagnosticsRetentionDays: z.number().int().min(1).max(3650),
+  sessionContinuityWindowMs: z
+    .number()
+    .int()
+    .min(60_000)
+    .max(30 * 24 * 60 * 60_000),
+  previewPrivacy: z.enum(['short', 'generic']),
+  audioEnabled: z.boolean(),
+  audioVolume: z.number().min(0).max(1),
+  browserNotificationsEnabled: z.boolean(),
+  webhookEnabled: z.boolean(),
+  webhookPreset: z.enum(['generic', 'ntfy']),
+  webhookEndpoint: z.string().max(2048),
+  webhookTopic: z.string().max(256),
+  webhookTimeoutMs: z.number().int().min(1000).max(60_000),
+  webhookMaxAttempts: z.number().int().min(1).max(20),
+  updatedAt: z.number().int().nonnegative(),
+});
+/** The released Phase 4 settings export shape, kept so those files still import. */
+const phaseFourSettingsSchema = z.object({
+  accountId: z.string().min(1),
   schemaVersion: z.literal(2),
   unacknowledgedAfterMs: z.number().int().positive(),
   unacknowledgedRepeatMs: z.number().int().positive(),
@@ -233,9 +261,10 @@ function queueSettings(settings: AccountSettingsRecord): QueueSettings {
 export function defaultAccountSettings(accountId: string, now: number): AccountSettingsRecord {
   return {
     accountId,
-    schemaVersion: 2,
+    schemaVersion: 3,
     ...defaultQueueSettings,
     diagnosticsRetentionDays: 30,
+    sessionContinuityWindowMs: defaultSessionContinuityWindowMs,
     previewPrivacy: 'short',
     audioEnabled: false,
     audioVolume: 0.8,
@@ -540,17 +569,19 @@ export class WorkflowRepository {
       [this.database.queueItems, this.database.alertEffects],
       async () => {
         const items = await this.database.queueItems.where('accountId').equals(accountId).toArray();
-        let inserted = 0;
+        const candidates: AlertEffect[] = [];
         for (const raw of items) {
-          const item = queueItemSchema.parse(raw);
-          for (const effect of evaluateDeadlines(item, now)) {
-            if (!(await this.database.alertEffects.get(effect.id))) {
-              await this.database.alertEffects.add(effectSchema.parse(effect));
-              inserted += 1;
-            }
-          }
+          candidates.push(...evaluateDeadlines(queueItemSchema.parse(raw), now));
         }
-        return inserted;
+        if (candidates.length === 0) return 0;
+        // One batched existence check rather than a round trip per item: at a thousand items the
+        // sequential form dominated the scheduler pass, which runs every fifteen seconds.
+        const existing = await this.database.alertEffects.bulkGet(candidates.map(({ id }) => id));
+        const missing = candidates
+          .filter((_, index) => existing[index] === undefined)
+          .map((effect) => effectSchema.parse(effect));
+        if (missing.length > 0) await this.database.alertEffects.bulkAdd(missing);
+        return missing.length;
       },
     );
   }
@@ -571,14 +602,25 @@ export class WorkflowRepository {
           .filter(({ dueAt }) => dueAt <= now)
           .toArray();
         const ready: AlertDeliveryRecord[] = [];
-        for (const effect of effects.map((value) => effectSchema.parse(value))) {
+        const parsedEffects = effects.map((value) => effectSchema.parse(value));
+        // Batched so one scheduler pass costs a couple of round trips rather than one per
+        // effect-transport pair.
+        const deliveryIds = parsedEffects.flatMap((effect) =>
+          transports.map((transport) => `${effect.id}|${transport}`),
+        );
+        const existingDeliveries = new Map(
+          (await this.database.alertDeliveries.bulkGet(deliveryIds))
+            .filter((value): value is AlertDeliveryRecord => value !== undefined)
+            .map((value) => [value.id, value]),
+        );
+        for (const effect of parsedEffects) {
           if (transports.length === 0) {
             await this.database.alertEffects.update(effect.id, { status: 'delivered' });
             continue;
           }
           for (const transport of transports) {
             const id = `${effect.id}|${transport}`;
-            let delivery = await this.database.alertDeliveries.get(id);
+            let delivery = existingDeliveries.get(id);
             if (!delivery) {
               delivery = deliverySchema.parse({
                 id,
@@ -785,6 +827,123 @@ export class WorkflowRepository {
     await this.database.ingestionIssues.put({ ...issue, id, status: 'open' });
   }
 
+  /** The work session currently open for the account, if any. */
+  public async activeWorkSession(accountId: string): Promise<WorkSessionRecord | undefined> {
+    const open = await this.database.workSessions
+      .where('accountId')
+      .equals(accountId)
+      .filter(({ endedAt }) => endedAt === undefined)
+      .toArray();
+    // Defensive: only one session may be open. If a crash ever left more, the newest wins and the
+    // older ones are closed rather than left to accumulate.
+    const sorted = [...open].sort((left, right) => right.startedAt - left.startedAt);
+    const [current, ...stale] = sorted;
+    for (const session of stale) {
+      await this.database.workSessions.update(session.id, {
+        endedAt: session.startedAt,
+        endReason: 'stale_auto_new',
+      });
+    }
+    return current;
+  }
+
+  public async startWorkSession(accountId: string, startedAt: number): Promise<WorkSessionRecord> {
+    const session: WorkSessionRecord = { id: this.idFactory(), accountId, startedAt };
+    await this.database.workSessions.add(session);
+    return session;
+  }
+
+  /**
+   * Ends a work session and returns a redacted summary of it. The summary carries counts and
+   * timings only: no previews, room IDs, event IDs, or senders, so an archived session can be kept
+   * or shared without carrying Matrix content out of the workflow store.
+   */
+  public async summarizeWorkSession(
+    accountId: string,
+    session: WorkSessionRecord,
+    endedAt: number,
+    endReason: NonNullable<WorkSessionRecord['endReason']>,
+  ): Promise<string> {
+    const projection = await this.projection(accountId);
+    const statusCounts: Record<string, number> = {};
+    for (const item of projection.items) {
+      statusCounts[item.status] = (statusCounts[item.status] ?? 0) + 1;
+    }
+    const deliveryCounts: Record<string, number> = {};
+    for (const delivery of projection.deliveries) {
+      deliveryCounts[delivery.status] = (deliveryCounts[delivery.status] ?? 0) + 1;
+    }
+    const openIssues = await this.database.ingestionIssues
+      .where('[accountId+status]')
+      .equals([accountId, 'open'])
+      .count();
+    return JSON.stringify(
+      {
+        kind: 'ackwatch-session-summary',
+        version: 1,
+        session: { startedAt: session.startedAt, endedAt, endReason },
+        totals: {
+          items: projection.items.length,
+          activities: projection.activities.length,
+          transitions: projection.transitions.length,
+          alertEffects: projection.effects.length,
+          alertDeliveries: projection.deliveries.length,
+          openIngestionIssues: openIssues,
+          quarantined: projection.quarantineCount,
+        },
+        itemsByStatus: statusCounts,
+        deliveriesByStatus: deliveryCounts,
+      },
+      null,
+      2,
+    );
+  }
+
+  /**
+   * Clears the work a session accumulated while preserving account configuration. Settings are the
+   * user's setup, not session output: wiping an endpoint or an alert preference on every session
+   * end would be hostile.
+   */
+  public async clearSessionWork(accountId: string): Promise<void> {
+    await this.database.transaction(
+      'rw',
+      [
+        this.database.queueItems,
+        this.database.activities,
+        this.database.conversationKeys,
+        this.database.workflowTransitions,
+        this.database.alertEffects,
+        this.database.alertDeliveries,
+        this.database.alertAttempts,
+        this.database.ingestionIssues,
+        this.database.coverageIssues,
+        this.database.quarantine,
+      ],
+      async () => {
+        await Promise.all([
+          this.database.queueItems.where('accountId').equals(accountId).delete(),
+          this.database.activities.where('accountId').equals(accountId).delete(),
+          this.database.conversationKeys.where('accountId').equals(accountId).delete(),
+          this.database.workflowTransitions.where('accountId').equals(accountId).delete(),
+          this.database.alertEffects.where('accountId').equals(accountId).delete(),
+          this.database.alertDeliveries.where('accountId').equals(accountId).delete(),
+          this.database.alertAttempts.where('accountId').equals(accountId).delete(),
+          this.database.ingestionIssues.where('accountId').equals(accountId).delete(),
+          this.database.coverageIssues.where('accountId').equals(accountId).delete(),
+          this.database.quarantine.where('accountId').equals(accountId).delete(),
+        ]);
+      },
+    );
+  }
+
+  public async closeWorkSession(
+    sessionId: string,
+    endedAt: number,
+    endReason: NonNullable<WorkSessionRecord['endReason']>,
+  ): Promise<void> {
+    await this.database.workSessions.update(sessionId, { endedAt, endReason });
+  }
+
   public async beginMonitoringSession(
     accountId: string,
     sessionId: string,
@@ -814,7 +973,7 @@ export class WorkflowRepository {
 
   public async exportSettings(accountId: string): Promise<string> {
     const settings = await this.getSettings(accountId);
-    return JSON.stringify({ kind: 'ackwatch-settings', version: 2, settings }, null, 2);
+    return JSON.stringify({ kind: 'ackwatch-settings', version: 3, settings }, null, 2);
   }
 
   public async importSettings(
@@ -831,6 +990,11 @@ export class WorkflowRepository {
         z.object({
           kind: z.literal('ackwatch-settings'),
           version: z.literal(2),
+          settings: phaseFourSettingsSchema,
+        }),
+        z.object({
+          kind: z.literal('ackwatch-settings'),
+          version: z.literal(3),
           settings: settingsSchema,
         }),
       ])
@@ -839,12 +1003,24 @@ export class WorkflowRepository {
       ...defaultAccountSettings(accountId, this.now()),
       ...envelope.settings,
       accountId,
-      schemaVersion: 2,
+      schemaVersion: 3,
       webhookEnabled: false,
       updatedAt: this.now(),
     });
     await this.database.settings.put(imported);
     return imported;
+  }
+
+  /** Targeted lookups for the dispatcher, which needs one effect and one item per delivery and
+   * must not read the whole account to find them. */
+  public async alertEffect(accountId: string, effectId: string): Promise<AlertEffect | undefined> {
+    const raw = await this.database.alertEffects.get(effectId);
+    return raw && raw.accountId === accountId ? effectSchema.parse(raw) : undefined;
+  }
+
+  public async queueItem(accountId: string, itemId: string): Promise<QueueItem | undefined> {
+    const raw = await this.database.queueItems.get(itemId);
+    return raw && raw.accountId === accountId ? queueItemSchema.parse(raw) : undefined;
   }
 
   public async projection(accountId: string): Promise<WorkflowProjection> {

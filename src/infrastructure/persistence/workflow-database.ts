@@ -23,12 +23,14 @@ export interface ConversationRecord {
 
 export interface AccountSettingsRecord {
   readonly accountId: string;
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 3;
   readonly unacknowledgedAfterMs: number;
   readonly unacknowledgedRepeatMs: number;
   readonly acknowledgedAfterMs: number;
   readonly acknowledgedRepeatMs: number;
   readonly diagnosticsRetentionDays: number;
+  /** How long an unfinished work session may be resumed after it started before it is retired. */
+  readonly sessionContinuityWindowMs: number;
   readonly previewPrivacy: 'short' | 'generic';
   readonly audioEnabled: boolean;
   readonly audioVolume: number;
@@ -81,6 +83,19 @@ export interface MonitoringSessionRecord {
   readonly stopReason?: string;
 }
 
+/**
+ * A work session is the span the queue belongs to. It is deliberately not the same thing as a
+ * monitoring session: monitoring is armed and disarmed many times, and never survives a reload,
+ * while one work session spans those and holds the acknowledgements being worked through.
+ */
+export interface WorkSessionRecord {
+  readonly id: string;
+  readonly accountId: string;
+  readonly startedAt: number;
+  readonly endedAt?: number;
+  readonly endReason?: 'user_end' | 'user_new' | 'stale_auto_new';
+}
+
 export interface PersistedIngestionIssueRecord {
   readonly id: string;
   readonly accountId: string;
@@ -102,6 +117,10 @@ export interface QuarantinedRecord {
   readonly redactedShape: readonly string[];
 }
 
+/** Twelve hours: long enough to span a working day's interruptions, short enough that returning
+ * the next morning starts fresh. Configurable per account. */
+export const defaultSessionContinuityWindowMs = 12 * 60 * 60_000;
+
 export class WorkflowDatabase extends Dexie {
   public coverageIssues!: EntityTable<PersistedCoverageIssue, 'id'>;
   public queueItems!: EntityTable<QueueItem, 'id'>;
@@ -113,6 +132,7 @@ export class WorkflowDatabase extends Dexie {
   public alertAttempts!: EntityTable<AlertAttemptRecord, 'id'>;
   public settings!: EntityTable<AccountSettingsRecord, 'accountId'>;
   public monitoringSessions!: EntityTable<MonitoringSessionRecord, 'id'>;
+  public workSessions!: EntityTable<WorkSessionRecord, 'id'>;
   public ingestionIssues!: EntityTable<PersistedIngestionIssueRecord, 'id'>;
   public quarantine!: EntityTable<QuarantinedRecord, 'id'>;
 
@@ -162,6 +182,36 @@ export class WorkflowDatabase extends Dexie {
               webhookTopic: '',
               webhookTimeoutMs: 10_000,
               webhookMaxAttempts: 5,
+            });
+          });
+      });
+    this.version(4)
+      .stores({
+        coverageIssues: 'id, [accountId+status], accountId, roomId, updatedAt',
+        queueItems: 'id, accountId, [accountId+status], [accountId+updatedAt], conversationKey',
+        activities: 'id, &[accountId+eventId], itemId, [accountId+itemId], detectedAt',
+        conversationKeys: 'id, &[accountId+key], itemId',
+        workflowTransitions: 'id, accountId, itemId, [accountId+itemId], at',
+        alertEffects: 'id, accountId, itemId, [accountId+status], dueAt',
+        alertDeliveries:
+          'id, accountId, effectId, itemId, [accountId+status], [accountId+nextAttemptAt]',
+        alertAttempts: 'id, accountId, effectId, deliveryId, [accountId+startedAt]',
+        settings: 'accountId, updatedAt',
+        monitoringSessions: 'id, accountId, [accountId+startedAt]',
+        workSessions: 'id, accountId, [accountId+startedAt], startedAt',
+        ingestionIssues: 'id, [accountId+status], eventId, roomId, detectedAt',
+        quarantine: 'id, accountId, sourceStore, quarantinedAt',
+      })
+      .upgrade(async (transaction) => {
+        // Existing installs adopt the default continuity window; work already on screen becomes
+        // the first work session, opened at the moment of the upgrade rather than invented.
+        await transaction
+          .table<AccountSettingsRecord, string>('settings')
+          .toCollection()
+          .modify((settings) => {
+            Object.assign(settings, {
+              schemaVersion: 3,
+              sessionContinuityWindowMs: defaultSessionContinuityWindowMs,
             });
           });
       });

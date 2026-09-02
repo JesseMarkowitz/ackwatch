@@ -111,6 +111,12 @@ An account is identified by the canonical Matrix user ID plus the selected homes
 
 A monitoring session begins only after an eligible user gesture on **Start monitoring** and ends on **Stop monitoring**, logout, page teardown/reload, lock loss, or fatal client shutdown. Monitoring MUST NOT auto-resume after reload or process restart.
 
+### 5.2a Work session
+
+A work session is the span the attention queue belongs to. It is deliberately distinct from a monitoring session: monitoring is armed and disarmed many times and never survives a reload, whereas one work session spans those and holds the acknowledgements being worked through.
+
+AckWatch monitors for a session; it is not a long-term tracker. A work session begins on an explicit user action (including the first **Start monitoring** when none is open) and ends when the user ends it, or when a session found on startup is older than the configured continuity window.
+
 ### 5.3 Activity
 
 An activity is one qualifying Matrix event accepted during an armed monitoring session, or a later maintenance mutation associated with an already tracked event. Each accepted Matrix event MUST be idempotently keyed by account and event ID.
@@ -224,6 +230,19 @@ The domain MUST expose explicit commands: accept activity, mark viewed, acknowle
 - **DDL-004** Completion cancels active deadlines; reopen creates new cycle deadlines and effect IDs.
 - **DDL-005** Threshold durations MUST be configurable settings with these V1 defaults: immediate initial/reopen alert; unacknowledged escalation after 5 minutes, repeating every 5 minutes; acknowledged-work escalation after 30 minutes, repeating every 15 minutes.
 - **DDL-006** A queue item's active deadlines MUST be materialized when its attention cycle begins or when it is explicitly acknowledged. Changing settings MUST affect future cycles and future acknowledgements, but MUST NOT silently move existing deadlines.
+- **DDL-007 — Current-stage materialization (amended 2026-09-02, Phase 5):** Evaluating a deadline MUST materialize at most the single escalation stage that is currently due. Stages that elapsed unobserved MUST NOT be replayed. *Rationale:* external delivery is best-effort and runs only while the page runs (ADR-0009), so an alert for a window in which the page was closed cannot be delivered and MUST NOT be recorded as intent. The superseded behavior materialized every elapsed stage, which produced 2,017 alert effects for a single item after one week and an unbounded effect table in ordinary operation. This amends the escalation wording of DDL-005.
+
+### 6.9a Work session lifecycle
+
+- **SES-001** Exactly one work session MAY be open per account at a time. If more than one is ever found open, the newest MUST be adopted and the others closed.
+- **SES-002** Starting monitoring while no session is open MUST open one.
+- **SES-003** Ending a session MUST produce a redacted session summary **before** any of its work is deleted, and MUST then clear that work. The summary MUST contain counts and timings only: no previews, room IDs, event IDs, or senders.
+- **SES-004** Ending a session MUST NOT clear account configuration. Settings are the user's setup, not session output.
+- **SES-005** On startup, an open session whose age exceeds the continuity window MUST be retired automatically: archived per SES-003, then replaced by a new session, and the user MUST be told this happened.
+- **SES-006** On startup, an open session within the continuity window MUST be offered back to the user as an interrupted session. The user MUST be able to continue it, preserving acknowledgements already made, or start a new session.
+- **SES-007** While a session is interrupted and unadopted, no alert may be dispatched, because what should be alerted on has not yet been decided.
+- **SES-008** Resuming or retiring a session MUST NOT arm monitoring. AUTH/SYNC monitoring boundaries are unchanged: monitoring always comes up off and requires an explicit gesture.
+- **SES-009** The continuity window MUST be a configurable per-account setting, with a V1 default of 12 hours. Its age is measured from the session's start time.
 
 ### 6.10 Transactional persistence
 
@@ -234,9 +253,9 @@ The domain MUST expose explicit commands: accept activity, mark viewed, acknowle
 - **DB-005** Storage failure MUST be visible and MUST NOT degrade silently to volatile in-memory operation.
 - **DB-006** The application SHOULD request persistent browser storage after explaining why.
 - **DB-007** Export, diagnostics, clear-storage, corruption quarantine, and schema migration behavior MUST be delivered before V1 release.
-- **DB-008 — Completed-history retention:** Completed workflow items and their bounded metadata/previews MUST be retained indefinitely until an explicit user cleanup action or browser data eviction. Active and unresolved work MUST NOT be removed by retention cleanup. Diagnostics and webhook-attempt records MUST use a configurable retention period with a V1 default of 30 days.
+- **DB-008 — Completed-history retention (amended 2026-09-02, Phase 5):** Completed workflow items and their bounded metadata/previews MUST be retained until the work session that produced them ends, an explicit user cleanup action occurs, or browser data is evicted. Ending a session is such an explicit cleanup action. *Rationale:* AckWatch monitors for a session rather than tracking indefinitely; unbounded retention across sessions was the retention half of the same defect as DDL-007. Active and unresolved work MUST NOT be removed by retention cleanup. Diagnostics and webhook-attempt records MUST use a configurable retention period with a V1 default of 30 days.
 
-Required logical stores are queue items, activities, conversation keys, workflow transitions, alert effects, settings, monitoring sessions, and ingestion issues. Exact physical schema is an architecture decision constrained by these semantics.
+Required logical stores are queue items, activities, conversation keys, workflow transitions, alert effects, settings, monitoring sessions, work sessions, and ingestion issues. Exact physical schema is an architecture decision constrained by these semantics.
 
 #### Settings persistence
 

@@ -12,6 +12,7 @@ export default tseslint.config(
       'coverage/**',
       'dist/**',
       'dist-catalog/**',
+      'dist-benchmark/**',
       'node_modules/**',
     ],
   },

@@ -22,6 +22,9 @@ if (import.meta.env.MODE === 'catalog') {
       <StateCatalog />
     </StrictMode>,
   );
+} else if (import.meta.env.MODE === 'benchmark') {
+  const { installScaleBenchmark } = await import('./testing/benchmark/scale-benchmark');
+  installScaleBenchmark();
 } else {
   const controller = new AckWatchController();
   void controller.initialize();

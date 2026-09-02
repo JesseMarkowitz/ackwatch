@@ -236,3 +236,100 @@ describe('AckWatchController', () => {
     expect(controller.getSnapshot().phase).toBe('signed_out');
   });
 });
+
+describe('work session lifecycle', () => {
+  function sessionDependencies(databaseName: string, alertStarts: string[]) {
+    const base = durableDependencies();
+    return {
+      ...base,
+      createWorkflowRepository: (onHealth: ConstructorParameters<typeof WorkflowRepository>[3]) =>
+        new WorkflowRepository(databaseName, undefined, undefined, onHealth),
+      createAlertCoordinator: () => ({
+        ...base.createAlertCoordinator(),
+        start: () => alertStarts.push('start'),
+      }),
+    };
+  }
+
+  function controllerFor(databaseName: string, now: () => number, alertStarts: string[] = []) {
+    const credentialStore = new MemoryCredentials();
+    credentialStore.value = credentials;
+    return new AckWatchController({
+      ...sessionDependencies(databaseName, alertStarts),
+      clock: { now },
+      credentialStore,
+      instanceCoordinator: availableCoordinator([]),
+      createIssueRepository: () => new CoverageIssueRepository(`unused-${crypto.randomUUID()}`),
+      createRuntime: (options) => ({
+        start: async () => {
+          options.coverage.beginStartup();
+          options.coverage.observeSync({ state: 'syncing', fromCache: false });
+          options.onChange();
+        },
+        stop: async () => undefined,
+        logout: async () => undefined,
+        retryCoverageIssues: async () => undefined,
+      }),
+    });
+  }
+
+  it('starts with no session and opens one when monitoring starts', async () => {
+    const controller = controllerFor(`session-${crypto.randomUUID()}`, () => 50_000);
+    await controller.initialize();
+    expect(controller.getSnapshot().session.state).toBe('none');
+
+    controller.startMonitoring();
+    await vi.waitFor(() => expect(controller.getSnapshot().session.state).toBe('active'));
+  });
+
+  it('offers a recent session back without alerting or arming until the user chooses', async () => {
+    const databaseName = `session-${crypto.randomUUID()}`;
+    let now = 50_000;
+    const first = controllerFor(databaseName, () => now);
+    await first.initialize();
+    first.startMonitoring();
+    await vi.waitFor(() => expect(first.getSnapshot().session.state).toBe('active'));
+    await first.teardown();
+
+    // Reload one hour later, well inside the twelve hour continuity window.
+    now += 60 * 60_000;
+    const alertStarts: string[] = [];
+    const resumed = controllerFor(databaseName, () => now, alertStarts);
+    await resumed.initialize();
+
+    expect(resumed.getSnapshot()).toMatchObject({
+      session: { state: 'interrupted' },
+      coverage: { monitoring: 'off' },
+    });
+    // Nothing may be alerted on before the session is adopted.
+    expect(alertStarts).toEqual([]);
+
+    await resumed.continueInterruptedSession();
+    expect(resumed.getSnapshot().session.state).toBe('active');
+    expect(alertStarts).toEqual(['start']);
+    await resumed.teardown();
+  });
+
+  it('retires a session older than the continuity window and archives it first', async () => {
+    const databaseName = `session-${crypto.randomUUID()}`;
+    let now = 50_000;
+    const first = controllerFor(databaseName, () => now);
+    await first.initialize();
+    first.startMonitoring();
+    await vi.waitFor(() => expect(first.getSnapshot().session.state).toBe('active'));
+    await first.teardown();
+
+    // Return the next day, beyond the window.
+    now += 13 * 60 * 60_000;
+    const fresh = controllerFor(databaseName, () => now);
+    await fresh.initialize();
+
+    const snapshot = fresh.getSnapshot();
+    expect(snapshot.session.state).toBe('active');
+    expect(snapshot.session.notice).toMatch(/older than the continuity window/i);
+    // The summary is produced before anything is deleted, so the archive is never empty-handed.
+    expect(snapshot.session.archivedSummary).toContain('ackwatch-session-summary');
+    expect(snapshot.coverage.monitoring).toBe('off');
+    await fresh.teardown();
+  });
+});

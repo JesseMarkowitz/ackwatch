@@ -1,5 +1,6 @@
 dist/
 dist-catalog/
+dist-benchmark/
 artifacts/
 coverage/
 node_modules/

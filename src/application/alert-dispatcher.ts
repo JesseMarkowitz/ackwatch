@@ -40,10 +40,8 @@ export class AlertTransportError extends Error {
 
 export interface AlertRepositoryPort {
   getSettings(accountId: string): Promise<AccountSettingsRecord>;
-  projection(accountId: string): Promise<{
-    readonly effects: readonly AlertEffect[];
-    readonly items: readonly QueueItem[];
-  }>;
+  alertEffect(accountId: string, effectId: string): Promise<AlertEffect | undefined>;
+  queueItem(accountId: string, itemId: string): Promise<QueueItem | undefined>;
   prepareDueAlertDeliveries(
     accountId: string,
     now: number,
@@ -136,13 +134,16 @@ export class AlertDispatcher {
     if (settings.browserNotificationsEnabled) enabled.push('browser_notification');
     if (settings.webhookEnabled) enabled.push('webhook');
     const ready = await this.repository.prepareDueAlertDeliveries(accountId, now, enabled);
-    const projection = await this.repository.projection(accountId);
     for (const candidate of ready) {
       const claimed = await this.repository.claimAlertDelivery(accountId, candidate.id, now);
       if (!claimed) continue;
       const transport = this.transports.get(claimed.transport);
-      const effect = projection.effects.find(({ id }) => id === claimed.effectId);
-      const item = projection.items.find(({ id }) => id === claimed.itemId);
+      // Fetched by identity rather than scanned out of a full-account projection: the dispatcher
+      // needs exactly one effect and one item per delivery.
+      const [effect, item] = await Promise.all([
+        this.repository.alertEffect(accountId, claimed.effectId),
+        this.repository.queueItem(accountId, claimed.itemId),
+      ]);
       if (!transport || !effect || !item) {
         await this.fail(accountId, claimed, settings, 'TRANSPORT_UNAVAILABLE', false);
         continue;

@@ -486,17 +486,24 @@ export function evaluateDeadlines(item: QueueItem, now: number): readonly AlertE
   assertTimestamp(now, 'Evaluation time');
   const deadline = item.deadline;
   if (item.status === 'COMPLETED' || !deadline || now < deadline.firstAt) return [];
+  // Only the stage that is currently due is materialized. Stages that elapsed while the page was
+  // closed, backgrounded, or busy cannot be delivered retroactively — external delivery is
+  // best-effort and runs only while the page runs (ADR-0009) — and materializing them would create
+  // an unbounded alert backlog: one effect per repeat interval for the whole elapsed period, each
+  // becoming a delivery per transport. A week away produced over two thousand for a single item.
   const latestStage = Math.floor((now - deadline.firstAt) / deadline.repeatEveryMs);
-  return Array.from({ length: latestStage + 1 }, (_, stage) => ({
-    id: alertEffectId(item.id, item.cycleId, deadline.kind, stage),
-    accountId: item.accountId,
-    itemId: item.id,
-    cycleId: item.cycleId,
-    kind: deadline.kind,
-    stage,
-    dueAt: deadline.firstAt + stage * deadline.repeatEveryMs,
-    status: 'pending' as const,
-  }));
+  return [
+    {
+      id: alertEffectId(item.id, item.cycleId, deadline.kind, latestStage),
+      accountId: item.accountId,
+      itemId: item.id,
+      cycleId: item.cycleId,
+      kind: deadline.kind,
+      stage: latestStage,
+      dueAt: deadline.firstAt + latestStage * deadline.repeatEveryMs,
+      status: 'pending' as const,
+    },
+  ];
 }
 
 export function compareQueueItems(left: QueueItem, right: QueueItem): number {

@@ -38,7 +38,11 @@ import {
   type StorageHealth,
   type WorkflowProjection,
 } from '../infrastructure/persistence/workflow-repository';
-import type { AccountSettingsRecord } from '../infrastructure/persistence/workflow-database';
+import {
+  defaultSessionContinuityWindowMs,
+  type AccountSettingsRecord,
+  type WorkSessionRecord,
+} from '../infrastructure/persistence/workflow-database';
 
 export type AppPhase =
   'signed_out' | 'discovering' | 'password' | 'connecting' | 'active' | 'blocked' | 'error';
@@ -59,7 +63,19 @@ export interface AppSnapshot {
   readonly alerts: AlertChannelsSnapshot;
   readonly alertDeliveries?: WorkflowProjection['deliveries'];
   readonly crypto: CryptoSnapshot;
+  readonly session: WorkSessionSnapshot;
   readonly error?: string;
+}
+
+export interface WorkSessionSnapshot {
+  /** `none` before a session is opened, `interrupted` while the user chooses, `active` once running. */
+  readonly state: 'none' | 'active' | 'interrupted';
+  readonly startedAt?: number;
+  readonly continuityWindowMs: number;
+  /** Explains an automatic decision, such as retiring a session older than the window. */
+  readonly notice?: string;
+  /** The redacted summary of the most recently archived session, offered before it is discarded. */
+  readonly archivedSummary?: string;
 }
 
 export interface AckWatchControllerPort {
@@ -88,6 +104,9 @@ export interface AckWatchControllerPort {
   startSasVerification(): Promise<void>;
   confirmSasVerification(matches: boolean): Promise<void>;
   cancelOwnDeviceVerification(): Promise<void>;
+  continueInterruptedSession(): Promise<void>;
+  startNewSession(): Promise<void>;
+  endSession(): Promise<string | undefined>;
   logout(): Promise<void>;
 }
 
@@ -128,6 +147,20 @@ export interface WorkflowRepositoryPort extends AlertRepositoryPort {
   ): Promise<boolean>;
   recordIngestionIssue(
     issue: Parameters<WorkflowRepository['recordIngestionIssue']>[0],
+  ): Promise<void>;
+  activeWorkSession(accountId: string): Promise<WorkSessionRecord | undefined>;
+  startWorkSession(accountId: string, startedAt: number): Promise<WorkSessionRecord>;
+  summarizeWorkSession(
+    accountId: string,
+    session: WorkSessionRecord,
+    endedAt: number,
+    endReason: NonNullable<WorkSessionRecord['endReason']>,
+  ): Promise<string>;
+  clearSessionWork(accountId: string): Promise<void>;
+  closeWorkSession(
+    sessionId: string,
+    endedAt: number,
+    endReason: NonNullable<WorkSessionRecord['endReason']>,
   ): Promise<void>;
   beginMonitoringSession(accountId: string, sessionId: string, startedAt: number): Promise<void>;
   endMonitoringSession(sessionId: string, stoppedAt: number, stopReason: string): Promise<void>;
@@ -196,6 +229,10 @@ export class AckWatchController implements AckWatchControllerPort {
   };
   private accountSettings: AccountSettingsRecord | undefined;
   private monitoringSessionId: string | undefined;
+  private workSession: WorkSessionRecord | undefined;
+  private sessionState: WorkSessionSnapshot['state'] = 'none';
+  private sessionNotice: string | undefined;
+  private archivedSummary: string | undefined;
   private alerts: BrowserAlertCoordinatorPort | undefined;
   private cryptoSnapshot: CryptoSnapshot = initialCryptoSnapshot;
   private currentSnapshot: AppSnapshot;
@@ -285,6 +322,7 @@ export class AckWatchController implements AckWatchControllerPort {
   public startMonitoring(): void {
     void this.alerts?.prepareForMonitoring();
     try {
+      if (this.sessionState === 'none') void this.startNewSession();
       this.coverage.startMonitoring();
       this.error = undefined;
       const sessionId = crypto.randomUUID();
@@ -343,7 +381,7 @@ export class AckWatchController implements AckWatchControllerPort {
       ...this.accountSettings,
       ...patch,
       accountId,
-      schemaVersion: 2,
+      schemaVersion: 3,
       updatedAt: this.clock.now(),
     };
     await this.workflow.putSettings(next);
@@ -510,6 +548,8 @@ export class AckWatchController implements AckWatchControllerPort {
       await workflow.open();
       this.workflowProjection = await workflow.projection(credentials.accountId);
       this.accountSettings = await workflow.getSettings(credentials.accountId);
+      startupStage = 'work session resolution';
+      await this.resolveWorkSession(workflow, credentials.accountId);
       startupStage = 'alert coordinator initialization';
       this.alerts = this.createAlertCoordinator({
         repository: workflow,
@@ -524,7 +564,9 @@ export class AckWatchController implements AckWatchControllerPort {
           );
         },
       });
-      this.alerts.start();
+      // An interrupted session has not been adopted yet, so nothing may be alerted on until the
+      // user chooses. Alerting begins with the session.
+      if (this.sessionState === 'active') this.alerts.start();
       startupStage = 'Matrix runtime construction';
       const runtime = this.createRuntime({
         clock: this.clock,
@@ -638,6 +680,95 @@ export class AckWatchController implements AckWatchControllerPort {
     }
   }
 
+  /**
+   * Decides what the queue on disk means for this page load. A session older than the continuity
+   * window is retired automatically; a recent one is offered back to the user, because a reload or
+   * a crash mid-session must not cost them the acknowledgements they were working through.
+   */
+  private async resolveWorkSession(
+    workflow: WorkflowRepositoryPort,
+    accountId: string,
+  ): Promise<void> {
+    const existing = await workflow.activeWorkSession(accountId);
+    if (!existing) {
+      this.sessionState = 'none';
+      this.workSession = undefined;
+      return;
+    }
+    const windowMs =
+      this.accountSettings?.sessionContinuityWindowMs ?? defaultSessionContinuityWindowMs;
+    if (this.clock.now() - existing.startedAt >= windowMs) {
+      await this.retireSession(workflow, accountId, existing, 'stale_auto_new');
+      this.workSession = await workflow.startWorkSession(accountId, this.clock.now());
+      this.sessionState = 'active';
+      this.sessionNotice =
+        'The previous session was older than the continuity window, so it was archived and a new session started.';
+      return;
+    }
+    this.workSession = existing;
+    this.sessionState = 'interrupted';
+  }
+
+  /** Archives a session's redacted summary, then clears its work. The export always precedes the
+   * delete, so nothing is discarded without a record of it. */
+  private async retireSession(
+    workflow: WorkflowRepositoryPort,
+    accountId: string,
+    session: WorkSessionRecord,
+    reason: NonNullable<WorkSessionRecord['endReason']>,
+  ): Promise<void> {
+    const endedAt = this.clock.now();
+    this.archivedSummary = await workflow.summarizeWorkSession(accountId, session, endedAt, reason);
+    await workflow.clearSessionWork(accountId);
+    await workflow.closeWorkSession(session.id, endedAt, reason);
+    await this.refreshWorkflow();
+  }
+
+  public async continueInterruptedSession(): Promise<void> {
+    if (this.sessionState !== 'interrupted') return;
+    this.sessionState = 'active';
+    this.sessionNotice = undefined;
+    this.alerts?.start();
+    this.emit();
+  }
+
+  public async startNewSession(): Promise<void> {
+    const accountId = this.credentials?.accountId;
+    if (!accountId || !this.workflow) return;
+    try {
+      if (this.workSession) {
+        await this.retireSession(this.workflow, accountId, this.workSession, 'user_new');
+      }
+      this.workSession = await this.workflow.startWorkSession(accountId, this.clock.now());
+      this.sessionState = 'active';
+      this.sessionNotice = undefined;
+      this.alerts?.start();
+    } catch (error: unknown) {
+      this.handleWorkflowFailure(error);
+    }
+    this.emit();
+  }
+
+  /** Ends the session, returning its redacted summary so the caller can offer it before it goes. */
+  public async endSession(): Promise<string | undefined> {
+    const accountId = this.credentials?.accountId;
+    if (!accountId || !this.workflow || !this.workSession) return undefined;
+    try {
+      // Monitoring must not keep running into a session that no longer exists.
+      this.coverage.stopMonitoring();
+      await this.endMonitoringSession('session_end');
+      await this.retireSession(this.workflow, accountId, this.workSession, 'user_end');
+      this.workSession = undefined;
+      this.sessionState = 'none';
+      this.sessionNotice = undefined;
+      this.alerts?.stop();
+    } catch (error: unknown) {
+      this.handleWorkflowFailure(error);
+    }
+    this.emit();
+    return this.archivedSummary;
+  }
+
   private async endMonitoringSession(reason: string): Promise<void> {
     const sessionId = this.monitoringSessionId;
     this.monitoringSessionId = undefined;
@@ -690,6 +821,14 @@ export class AckWatchController implements AckWatchControllerPort {
       },
       alertDeliveries: this.workflowProjection.deliveries,
       crypto: this.cryptoSnapshot,
+      session: {
+        state: this.sessionState,
+        continuityWindowMs:
+          this.accountSettings?.sessionContinuityWindowMs ?? defaultSessionContinuityWindowMs,
+        ...(this.workSession === undefined ? {} : { startedAt: this.workSession.startedAt }),
+        ...(this.sessionNotice === undefined ? {} : { notice: this.sessionNotice }),
+        ...(this.archivedSummary === undefined ? {} : { archivedSummary: this.archivedSummary }),
+      },
       ...(this.accountSettings === undefined ? {} : { settings: this.accountSettings }),
       ...(this.error === undefined ? {} : { error: this.error }),
     };

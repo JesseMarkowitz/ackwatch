@@ -186,12 +186,14 @@ describe('WorkflowRepository state, thread, and maintenance behavior', () => {
 
     await expect(repository.evaluateDeadlines(accountId, 300_999)).resolves.toBe(0);
     await expect(repository.evaluateDeadlines(accountId, 301_000)).resolves.toBe(1);
-    await expect(repository.evaluateDeadlines(accountId, 901_000)).resolves.toBe(2);
+    // Only the currently due stage is inserted, so skipping ahead adds one effect, not one per
+    // interval that elapsed in between.
+    await expect(repository.evaluateDeadlines(accountId, 901_000)).resolves.toBe(1);
     await expect(repository.evaluateDeadlines(accountId, 901_000)).resolves.toBe(0);
 
     await repository.applyCommand(accountId, itemId, { kind: 'complete', at: 902_000 });
     const projection = await repository.projection(accountId);
-    expect(projection.effects).toHaveLength(4);
+    expect(projection.effects).toHaveLength(3);
     expect(projection.effects.every(({ status }) => status === 'cancelled')).toBe(true);
   });
 
@@ -363,7 +365,7 @@ describe('WorkflowRepository schemas, settings, and corruption', () => {
     ).toMatchObject({
       status: 'open',
     });
-    expect(repository.unsafeDatabaseForTests().verno).toBe(3);
+    expect(repository.unsafeDatabaseForTests().verno).toBe(4);
   });
 
   it('migrates released Phase 3 settings to alert configuration defaults', async () => {
@@ -388,13 +390,16 @@ describe('WorkflowRepository schemas, settings, and corruption', () => {
     old.close();
 
     const repository = await createRepository(name);
+    // A v2-origin database migrates through both hops, so it must arrive with the Phase 4 alert
+    // defaults and the Phase 5 session window together.
     await expect(repository.getSettings(accountId)).resolves.toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       previewPrivacy: 'generic',
       audioEnabled: true,
       audioVolume: 0.8,
       webhookPreset: 'generic',
       webhookMaxAttempts: 5,
+      sessionContinuityWindowMs: 12 * 60 * 60_000,
     });
   });
 
@@ -443,10 +448,11 @@ describe('WorkflowRepository schemas, settings, and corruption', () => {
     });
 
     await expect(repository.importSettings(accountId, legacy)).resolves.toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       previewPrivacy: 'generic',
       webhookEnabled: false,
       webhookPreset: 'generic',
+      sessionContinuityWindowMs: 12 * 60 * 60_000,
     });
   });
 
@@ -483,5 +489,119 @@ describe('WorkflowRepository schemas, settings, and corruption', () => {
     expect(health.at(-1)?.state).toBe('corrupt');
     const quarantine = await repository.unsafeDatabaseForTests().quarantine.toArray();
     expect(JSON.stringify(quarantine)).not.toContain('not-a-room-id');
+  });
+});
+
+describe('work session lifecycle', () => {
+  it('opens one session at a time and closes strays left by a crash', async () => {
+    const repository = await createRepository();
+
+    const first = await repository.startWorkSession(accountId, 1_000);
+    await expect(repository.activeWorkSession(accountId)).resolves.toMatchObject({ id: first.id });
+
+    const second = await repository.startWorkSession(accountId, 2_000);
+    // Two open sessions can only come from a crash between writes. The newest is adopted and the
+    // older is closed rather than left to accumulate.
+    await expect(repository.activeWorkSession(accountId)).resolves.toMatchObject({ id: second.id });
+    const strays = await repository
+      .unsafeDatabaseForTests()
+      .workSessions.where('accountId')
+      .equals(accountId)
+      .filter(({ endedAt }) => endedAt === undefined)
+      .count();
+    expect(strays).toBe(1);
+  });
+
+  it('summarizes a session without carrying any Matrix content out of the store', async () => {
+    const repository = await createRepository();
+    const session = await repository.startWorkSession(accountId, 1_000);
+    await repository.acceptActivity(
+      activity('$secret', { preview: 'CONFIDENTIAL BODY', roomId: '!private:example.test' }),
+    );
+
+    const summary = await repository.summarizeWorkSession(accountId, session, 9_000, 'user_end');
+
+    expect(summary).not.toContain('CONFIDENTIAL BODY');
+    expect(summary).not.toContain('!private:example.test');
+    expect(summary).not.toContain('$secret');
+    expect(summary).not.toContain('@sender:example.test');
+    expect(JSON.parse(summary)).toMatchObject({
+      kind: 'ackwatch-session-summary',
+      session: { startedAt: 1_000, endedAt: 9_000, endReason: 'user_end' },
+      totals: { items: 1, activities: 1 },
+    });
+  });
+
+  it('clears session work but preserves account configuration', async () => {
+    const repository = await createRepository();
+    await repository.acceptActivity(activity());
+    await repository.putSettings({
+      ...defaultAccountSettings(accountId, 1_000),
+      webhookEndpoint: 'https://receiver.example.test/hook',
+      sessionContinuityWindowMs: 3_600_000,
+      updatedAt: 1_000,
+    });
+
+    await repository.clearSessionWork(accountId);
+
+    const projection = await repository.projection(accountId);
+    expect(projection.items).toHaveLength(0);
+    expect(projection.activities).toHaveLength(0);
+    expect(projection.transitions).toHaveLength(0);
+    // Configuration is the user's setup, not session output.
+    await expect(repository.getSettings(accountId)).resolves.toMatchObject({
+      webhookEndpoint: 'https://receiver.example.test/hook',
+      sessionContinuityWindowMs: 3_600_000,
+    });
+  });
+
+  it('migrates a released Phase 4 database to session-aware settings', async () => {
+    const name = `migration-v3-${crypto.randomUUID()}`;
+    const old = new Dexie(name);
+    old.version(3).stores({
+      coverageIssues: 'id, [accountId+status], accountId, roomId, updatedAt',
+      queueItems: 'id, accountId, [accountId+status], [accountId+updatedAt], conversationKey',
+      activities: 'id, &[accountId+eventId], itemId, [accountId+itemId], detectedAt',
+      conversationKeys: 'id, &[accountId+key], itemId',
+      workflowTransitions: 'id, accountId, itemId, [accountId+itemId], at',
+      alertEffects: 'id, accountId, itemId, [accountId+status], dueAt',
+      alertDeliveries:
+        'id, accountId, effectId, itemId, [accountId+status], [accountId+nextAttemptAt]',
+      alertAttempts: 'id, accountId, effectId, deliveryId, [accountId+startedAt]',
+      settings: 'accountId, updatedAt',
+      monitoringSessions: 'id, accountId, [accountId+startedAt]',
+      ingestionIssues: 'id, [accountId+status], eventId, roomId, detectedAt',
+      quarantine: 'id, accountId, sourceStore, quarantinedAt',
+    });
+    await old.open();
+    await old.table('settings').add({
+      accountId,
+      schemaVersion: 2,
+      unacknowledgedAfterMs: 300_000,
+      unacknowledgedRepeatMs: 300_000,
+      acknowledgedAfterMs: 1_800_000,
+      acknowledgedRepeatMs: 900_000,
+      diagnosticsRetentionDays: 30,
+      previewPrivacy: 'short',
+      audioEnabled: true,
+      audioVolume: 0.8,
+      browserNotificationsEnabled: false,
+      webhookEnabled: false,
+      webhookPreset: 'generic',
+      webhookEndpoint: '',
+      webhookTopic: '',
+      webhookTimeoutMs: 10_000,
+      webhookMaxAttempts: 5,
+      updatedAt: 1_000,
+    });
+    old.close();
+
+    const repository = await createRepository(name);
+    await expect(repository.getSettings(accountId)).resolves.toMatchObject({
+      schemaVersion: 3,
+      audioEnabled: true,
+      sessionContinuityWindowMs: 12 * 60 * 60_000,
+    });
+    expect(repository.unsafeDatabaseForTests().verno).toBe(4);
   });
 });

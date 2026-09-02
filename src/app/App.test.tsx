@@ -33,6 +33,7 @@ describe('foundation shell', () => {
     const applyQueueCommand = vi.fn(async () => undefined);
     const snapshot: AppSnapshot = {
       phase: 'active',
+      session: { state: 'active', startedAt: 0, continuityWindowMs: 12 * 60 * 60_000 },
       accountLabel: '@operator:example.test',
       homeserverLabel: 'https://example.test',
       coverage: {
@@ -97,6 +98,9 @@ describe('foundation shell', () => {
     const controller: AckWatchControllerPort = {
       getSnapshot: () => snapshot,
       subscribe: () => () => undefined,
+      continueInterruptedSession: async () => undefined,
+      startNewSession: async () => undefined,
+      endSession: async () => undefined,
       initialize: async () => undefined,
       prepareLogin: async () => undefined,
       login: async () => undefined,

@@ -17,6 +17,7 @@ const baseCoverage: AppSnapshot['coverage'] = {
 const signedOut: AppSnapshot = {
   phase: 'signed_out',
   accountLabel: 'Not signed in',
+  session: { state: 'none', continuityWindowMs: 12 * 60 * 60_000 },
   coverage: {
     connection: 'signed_out',
     monitoring: 'off',
@@ -43,6 +44,11 @@ const signedOut: AppSnapshot = {
 const active = (coverage: Partial<AppSnapshot['coverage']> = {}): AppSnapshot => ({
   phase: 'active',
   accountLabel: '@operator:example.test',
+  session: {
+    state: 'active',
+    startedAt: Date.UTC(2026, 7, 31, 9, 0),
+    continuityWindowMs: 12 * 60 * 60_000,
+  },
   homeserverLabel: 'https://matrix.example.test',
   coverage: { ...baseCoverage, ...coverage },
   activities: [],
@@ -304,6 +310,24 @@ const fixtures = {
     ...active(),
     phase: 'blocked',
     error: 'Another AckWatch tab owns this Matrix account session.',
+  },
+  'session-interrupted': {
+    ...active(),
+    session: {
+      state: 'interrupted',
+      startedAt: Date.UTC(2026, 7, 31, 9, 0),
+      continuityWindowMs: 12 * 60 * 60_000,
+    },
+  },
+  'session-archived': {
+    ...active(),
+    session: {
+      state: 'active',
+      startedAt: Date.UTC(2026, 7, 31, 9, 0),
+      continuityWindowMs: 12 * 60 * 60_000,
+      notice:
+        'The previous session was older than the continuity window, so it was archived and a new session started.',
+    },
   },
   'signed-out': signedOut,
 } satisfies Record<string, AppSnapshot>;

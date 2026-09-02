@@ -44,6 +44,16 @@ const scenarios = [
     state: 'storage-fault',
     viewport: { width: 1440, height: 1000 },
   },
+  {
+    name: 'session-interrupted-desktop',
+    state: 'session-interrupted',
+    viewport: { width: 1440, height: 1200 },
+  },
+  {
+    name: 'session-archived-desktop',
+    state: 'session-archived',
+    viewport: { width: 1440, height: 1200 },
+  },
   { name: 'signed-out-narrow', state: 'signed-out', viewport: { width: 390, height: 1100 } },
   { name: 'workflow-narrow', state: 'workflow', viewport: { width: 390, height: 1400 } },
 ] as const;

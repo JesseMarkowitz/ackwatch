@@ -8,7 +8,7 @@ const files = fileOutput.split('\n').filter(Boolean);
 const forbiddenPaths = [
   /(^|\/)\.env(\.|$)/,
   /(^|\/)artifacts\//,
-  /(^|\/)dist(-catalog)?\//,
+  /(^|\/)dist(-catalog|-benchmark)?\//,
   /(^|\/)node_modules\//,
   /(^|\/)\.research-sources\//,
 ];

@@ -1,7 +1,13 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 
-const forbiddenMarkers = ['data-catalog-state', 'CatalogState', 'signed-out-narrow'];
+const forbiddenMarkers = [
+  'data-catalog-state',
+  'CatalogState',
+  'signed-out-narrow',
+  '__ackwatchScale',
+  'scaleBenchmark',
+];
 const files = readdirSync('dist', { recursive: true, withFileTypes: true });
 
 for (const file of files) {
@@ -19,4 +25,6 @@ for (const file of files) {
   }
 }
 
-process.stdout.write('Production bundle excludes the test-state catalog and source maps.\n');
+process.stdout.write(
+  'Production bundle excludes the test-state catalog, scale benchmark, and source maps.\n',
+);

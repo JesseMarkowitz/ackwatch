@@ -192,13 +192,30 @@ describe('queue cycles and deadlines', () => {
     });
   });
 
-  it('evaluates exact boundaries and every elapsed deterministic stage', () => {
+  it('evaluates exact boundaries and materializes only the stage that is currently due', () => {
     const current = item('NEW');
     expect(evaluateDeadlines(current, 300_999)).toEqual([]);
     expect(
       evaluateDeadlines(current, 301_000).map(({ stage, dueAt }) => ({ stage, dueAt })),
     ).toEqual([{ stage: 0, dueAt: 301_000 }]);
-    expect(evaluateDeadlines(current, 901_000).map(({ stage }) => stage)).toEqual([0, 1, 2]);
+    // Stages that elapsed unobserved are not replayed: each evaluation yields at most the one
+    // alert that is due now, so the effect table cannot grow with the time spent away.
+    expect(
+      evaluateDeadlines(current, 901_000).map(({ stage, dueAt }) => ({ stage, dueAt })),
+    ).toEqual([{ stage: 2, dueAt: 901_000 }]);
+  });
+
+  it('cannot accumulate an alert backlog across a long absence', () => {
+    const current = item('NEW');
+    const oneWeek = 301_000 + 7 * 24 * 60 * 60_000;
+    const thirtyDays = 301_000 + 30 * 24 * 60 * 60_000;
+
+    expect(evaluateDeadlines(current, oneWeek)).toHaveLength(1);
+    expect(evaluateDeadlines(current, thirtyDays)).toHaveLength(1);
+    // Re-evaluating at the same moment is idempotent: the stage is encoded in the effect ID.
+    expect(evaluateDeadlines(current, thirtyDays)[0]?.id).toBe(
+      evaluateDeadlines(current, thirtyDays)[0]?.id,
+    );
   });
 
   it('completion cancels deadlines and activity reopens with a fresh cycle', () => {
