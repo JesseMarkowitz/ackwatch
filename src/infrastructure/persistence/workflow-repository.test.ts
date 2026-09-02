@@ -117,6 +117,68 @@ describe('WorkflowRepository atomic acceptance', () => {
 });
 
 describe('WorkflowRepository state, thread, and maintenance behavior', () => {
+  it('durably claims, retries, exhausts, and manually retries alert delivery with stable IDs', async () => {
+    const repository = await createRepository();
+    await repository.acceptActivity(activity());
+    const [audio, webhook] = await repository.prepareDueAlertDeliveries(accountId, 1_000, [
+      'audio',
+      'webhook',
+    ]);
+    expect([audio?.id, webhook?.id]).toEqual([
+      expect.stringContaining('|audio'),
+      expect.stringContaining('|webhook'),
+    ]);
+
+    const claimedAudio = await repository.claimAlertDelivery(accountId, audio?.id ?? '', 1_000);
+    await repository.settleAlertDelivery(accountId, claimedAudio?.id ?? '', {
+      status: 'delivered',
+      at: 1_001,
+    });
+    const claimedWebhook = await repository.claimAlertDelivery(accountId, webhook?.id ?? '', 1_000);
+    const retrying = await repository.settleAlertDelivery(accountId, claimedWebhook?.id ?? '', {
+      status: 'failed',
+      at: 1_001,
+      errorCode: 'HTTP_503',
+      retryable: true,
+      maxAttempts: 2,
+      responseStatus: 503,
+    });
+    expect(retrying).toMatchObject({ status: 'pending', nextAttemptAt: 2_001, attemptCount: 1 });
+    await expect(
+      repository.claimAlertDelivery(accountId, retrying.id, 2_000),
+    ).resolves.toBeUndefined();
+    await repository.claimAlertDelivery(accountId, retrying.id, 2_001);
+    const exhausted = await repository.settleAlertDelivery(accountId, retrying.id, {
+      status: 'failed',
+      at: 2_002,
+      errorCode: 'HTTP_503',
+      retryable: true,
+      maxAttempts: 2,
+      responseStatus: 503,
+    });
+    expect(exhausted.status).toBe('exhausted');
+    expect((await repository.projection(accountId)).effects[0]?.status).toBe('delivered');
+
+    await repository.retryAlertDelivery(accountId, retrying.id, 3_000);
+    const manual = await repository.claimAlertDelivery(accountId, retrying.id, 3_000);
+    expect(manual).toMatchObject({ id: retrying.id, attemptCount: 3 });
+  });
+
+  it('reclaims an alert delivery only after its crash lease expires', async () => {
+    const repository = await createRepository();
+    await repository.acceptActivity(activity());
+    const [delivery] = await repository.prepareDueAlertDeliveries(accountId, 1_000, ['webhook']);
+    await repository.claimAlertDelivery(accountId, delivery?.id ?? '', 1_000, 500);
+
+    expect(await repository.prepareDueAlertDeliveries(accountId, 1_499, ['webhook'])).toEqual([]);
+    expect(await repository.prepareDueAlertDeliveries(accountId, 1_500, ['webhook'])).toEqual([
+      expect.objectContaining({ id: delivery?.id, status: 'delivering' }),
+    ]);
+    expect(
+      await repository.claimAlertDelivery(accountId, delivery?.id ?? '', 1_500, 500),
+    ).toMatchObject({ attemptCount: 2 });
+  });
+
   it('materializes each due deadline effect once and cancels pending effects on completion', async () => {
     const repository = await createRepository();
     const accepted = await repository.acceptActivity(activity());
@@ -131,6 +193,23 @@ describe('WorkflowRepository state, thread, and maintenance behavior', () => {
     const projection = await repository.projection(accountId);
     expect(projection.effects).toHaveLength(4);
     expect(projection.effects.every(({ status }) => status === 'cancelled')).toBe(true);
+  });
+
+  it('cancels materialized unacknowledged deliveries when the item is acknowledged', async () => {
+    const repository = await createRepository();
+    const accepted = await repository.acceptActivity(activity());
+    const itemId = accepted.itemId as string;
+    await repository.prepareDueAlertDeliveries(accountId, 301_000, ['webhook']);
+
+    await repository.applyCommand(accountId, itemId, { kind: 'acknowledge', at: 301_001 });
+
+    const projection = await repository.projection(accountId);
+    const unacknowledged = projection.effects.find(({ kind }) => kind === 'unacknowledged');
+    expect(unacknowledged?.status).toBe('cancelled');
+    expect(
+      projection.deliveries.find(({ effectId }) => effectId === unacknowledged?.id),
+    ).toMatchObject({ status: 'exhausted', lastErrorCode: 'EFFECT_CANCELLED' });
+    expect(projection.effects.find(({ kind }) => kind === 'initial')?.status).toBe('pending');
   });
 
   it('rolls back a rejected command without changing persisted workflow state', async () => {
@@ -284,7 +363,39 @@ describe('WorkflowRepository schemas, settings, and corruption', () => {
     ).toMatchObject({
       status: 'open',
     });
-    expect(repository.unsafeDatabaseForTests().verno).toBe(2);
+    expect(repository.unsafeDatabaseForTests().verno).toBe(3);
+  });
+
+  it('migrates released Phase 3 settings to alert configuration defaults', async () => {
+    const name = `migration-v2-${crypto.randomUUID()}`;
+    const old = new Dexie(name);
+    old.version(2).stores({ settings: 'accountId, updatedAt' });
+    await old.open();
+    await old.table('settings').add({
+      accountId,
+      schemaVersion: 1,
+      unacknowledgedAfterMs: 300_000,
+      unacknowledgedRepeatMs: 300_000,
+      acknowledgedAfterMs: 1_800_000,
+      acknowledgedRepeatMs: 900_000,
+      diagnosticsRetentionDays: 30,
+      previewPrivacy: 'generic',
+      audioEnabled: true,
+      browserNotificationsEnabled: false,
+      webhookEnabled: false,
+      updatedAt: 1_000,
+    });
+    old.close();
+
+    const repository = await createRepository(name);
+    await expect(repository.getSettings(accountId)).resolves.toMatchObject({
+      schemaVersion: 2,
+      previewPrivacy: 'generic',
+      audioEnabled: true,
+      audioVolume: 0.8,
+      webhookPreset: 'generic',
+      webhookMaxAttempts: 5,
+    });
   });
 
   it('round-trips account settings separately and disables webhook on import', async () => {
@@ -307,6 +418,35 @@ describe('WorkflowRepository schemas, settings, and corruption', () => {
       accountId: '@other:example.test|https://example.test',
       previewPrivacy: 'generic',
       webhookEnabled: false,
+    });
+  });
+
+  it('imports a released Phase 3 settings export without enabling its webhook', async () => {
+    const repository = await createRepository();
+    const legacy = JSON.stringify({
+      kind: 'ackwatch-settings',
+      version: 1,
+      settings: {
+        accountId,
+        schemaVersion: 1,
+        unacknowledgedAfterMs: 60_000,
+        unacknowledgedRepeatMs: 60_000,
+        acknowledgedAfterMs: 120_000,
+        acknowledgedRepeatMs: 120_000,
+        diagnosticsRetentionDays: 14,
+        previewPrivacy: 'generic',
+        audioEnabled: true,
+        browserNotificationsEnabled: true,
+        webhookEnabled: true,
+        updatedAt: 1_000,
+      },
+    });
+
+    await expect(repository.importSettings(accountId, legacy)).resolves.toMatchObject({
+      schemaVersion: 2,
+      previewPrivacy: 'generic',
+      webhookEnabled: false,
+      webhookPreset: 'generic',
     });
   });
 

@@ -781,6 +781,213 @@ button:disabled {
   font-size: 0.65rem;
 }
 
+.alert-settings,
+.crypto-settings {
+  display: grid;
+  grid-template-columns: minmax(16rem, 0.8fr) minmax(22rem, 1.2fr);
+  gap: 2rem;
+  margin-top: 1.5rem;
+  padding: 1.4rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.38);
+}
+
+.alert-settings h2,
+.alert-settings p,
+.crypto-settings h2,
+.crypto-settings p {
+  margin: 0;
+}
+
+.alert-settings h2,
+.crypto-settings h2 {
+  font-size: 1rem;
+}
+
+.alert-settings p:not(.eyebrow),
+.crypto-settings p:not(.eyebrow) {
+  margin-top: 0.4rem;
+  color: #5b6563;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.alert-settings__controls {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.alert-settings__controls > label {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.alert-settings__controls input[type='range'] {
+  flex: 1;
+}
+
+.alert-settings details {
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  background: rgba(245, 242, 233, 0.65);
+}
+
+.alert-settings summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.alert-settings details > label,
+.alert-settings details > input,
+.alert-settings details > select {
+  display: block;
+  width: 100%;
+}
+
+.alert-settings details > label {
+  margin-top: 0.75rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.alert-settings details > input,
+.alert-settings details > select {
+  min-height: 2.4rem;
+  margin-top: 0.3rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: white;
+  font: inherit;
+}
+
+.webhook-preview {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 0.7rem;
+  margin-top: 0.8rem;
+  padding: 0.7rem;
+  border-left: 0.25rem solid var(--mint);
+  background: white;
+  font-size: 0.65rem;
+  line-height: 1.5;
+}
+
+.alert-retry {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.7rem;
+  border: 1px solid var(--coral);
+  border-radius: 0.35rem;
+  font-size: 0.68rem;
+}
+
+.crypto-status {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin: 0;
+}
+
+.crypto-status div {
+  padding: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.crypto-status dt {
+  color: #687471;
+  font-size: 0.6rem;
+}
+
+.crypto-status dd {
+  margin: 0.25rem 0 0;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.crypto-actions {
+  display: grid;
+  grid-column: 2;
+  gap: 0.6rem;
+}
+
+.verification-sas {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.85rem;
+  background: var(--paper);
+}
+
+.verification-sas ol {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.crypto-actions details {
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+}
+
+.crypto-actions summary {
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.crypto-actions label,
+.crypto-actions input {
+  display: block;
+  width: 100%;
+}
+
+.crypto-actions label {
+  margin-top: 0.65rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.crypto-actions input {
+  min-height: 2.35rem;
+  margin: 0.25rem 0 0.6rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+}
+
+.recovery-key {
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--coral);
+  border-radius: 0.35rem;
+  background: var(--coral-wash);
+  font-size: 0.68rem;
+}
+
+.recovery-key code {
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
 .button-link {
   display: inline-flex;
   align-items: center;
@@ -943,6 +1150,30 @@ button:disabled {
   color: #687471;
 }
 
+.detail-media {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.5rem;
+  margin: 0.8rem 0 0;
+}
+
+.detail-media div {
+  padding: 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+}
+
+.detail-media dt {
+  color: #687471;
+  font-size: 0.58rem;
+}
+
+.detail-media dd {
+  margin: 0.25rem 0 0;
+  overflow-wrap: anywhere;
+  font-size: 0.68rem;
+}
+
 .detail-activity-list {
   display: grid;
   gap: 0.45rem;
@@ -1045,13 +1276,27 @@ footer p {
   }
 
   .workflow-board__heading,
-  .storage-card {
+  .storage-card,
+  .alert-settings,
+  .crypto-settings {
     align-items: flex-start;
     flex-direction: column;
   }
 
   .workflow-columns {
     grid-template-columns: 1fr;
+  }
+
+  .alert-settings {
+    grid-template-columns: 1fr;
+  }
+
+  .crypto-settings {
+    grid-template-columns: 1fr;
+  }
+
+  .crypto-actions {
+    grid-column: auto;
   }
 
   footer {

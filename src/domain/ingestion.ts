@@ -8,6 +8,9 @@ export interface RawMatrixEvent {
   readonly originServerTs?: number;
   readonly content?: Readonly<Record<string, unknown>>;
   readonly redacts?: string;
+  readonly wireType?: string;
+  readonly decryptionUpdate?: 'success' | 'failure';
+  readonly decryptionFailureCode?: string;
 }
 
 export interface IngestionEnvelope {
@@ -35,12 +38,14 @@ export interface SupportedActivity {
   readonly roomId: string;
   readonly sender: string;
   readonly eventType: string;
-  readonly messageType: 'm.text' | 'm.notice' | 'm.emote' | 'm.image' | 'm.file';
+  readonly messageType: 'm.text' | 'm.notice' | 'm.emote' | 'm.image' | 'm.file' | 'm.encrypted';
   readonly preview: string;
   readonly detectedAt: number;
   readonly localSequence: number;
   readonly provenance: DeliveryProvenance;
-  readonly contentState: 'clear';
+  readonly contentState: 'clear' | 'encrypted_placeholder' | 'unavailable';
+  readonly decryptionFailureCode?: string;
+  readonly media?: SafeMediaMetadata;
   readonly relationKind: 'independent' | 'thread' | 'reply';
   readonly relationEventId?: string;
   readonly roomName?: string;
@@ -48,12 +53,15 @@ export interface SupportedActivity {
 
 export interface MaintenanceMutation {
   readonly kind: 'maintenance';
-  readonly mutation: 'edit' | 'redaction';
+  readonly mutation: 'edit' | 'redaction' | 'decryption_success' | 'decryption_failure';
   readonly accountId: string;
   readonly targetEventId: string;
   readonly roomId: string;
   readonly detectedAt: number;
   readonly preview?: string;
+  readonly messageType?: SupportedActivity['messageType'];
+  readonly decryptionFailureCode?: string;
+  readonly media?: SafeMediaMetadata;
 }
 
 export interface IgnoredActivity {
@@ -64,7 +72,7 @@ export interface IgnoredActivity {
 
 export interface IngestionIssue {
   readonly kind: 'issue';
-  readonly code: 'malformed_event' | 'encrypted_not_enabled' | 'processing_failure';
+  readonly code: 'malformed_event' | 'decryption_failure' | 'processing_failure';
   readonly detail: string;
   readonly eventId?: string;
   readonly roomId?: string;
@@ -88,9 +96,72 @@ const supportedMessageTypes = new Set<SupportedActivity['messageType']>([
   'm.file',
 ]);
 
+export interface SafeMediaMetadata {
+  readonly name: string;
+  readonly mimeType?: string;
+  readonly size?: number;
+  readonly width?: number;
+  readonly height?: number;
+}
+
 function boundedPreview(value: unknown): string {
   if (typeof value !== 'string') return '';
   return Array.from(value).slice(0, 160).join('');
+}
+
+function safeNonnegativeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function mediaMetadata(content: Readonly<Record<string, unknown>>): SafeMediaMetadata | undefined {
+  if (content.msgtype !== 'm.image' && content.msgtype !== 'm.file') return undefined;
+  const info =
+    content.info && typeof content.info === 'object'
+      ? (content.info as Readonly<Record<string, unknown>>)
+      : {};
+  const name = boundedPreview(content.filename ?? content.body) || 'Attachment';
+  const mimeType = typeof info.mimetype === 'string' ? boundedPreview(info.mimetype) : undefined;
+  const size = safeNonnegativeInteger(info.size);
+  const width = safeNonnegativeInteger(info.w);
+  const height = safeNonnegativeInteger(info.h);
+  return {
+    name,
+    ...(mimeType === undefined ? {} : { mimeType }),
+    ...(size === undefined ? {} : { size }),
+    ...(width === undefined ? {} : { width }),
+    ...(height === undefined ? {} : { height }),
+  };
+}
+
+function relationOf(relatesTo: Readonly<Record<string, unknown>> | undefined): {
+  readonly relationKind: SupportedActivity['relationKind'];
+  readonly relationEventId?: string;
+} {
+  const replyMetadata =
+    relatesTo?.['m.in_reply_to'] && typeof relatesTo['m.in_reply_to'] === 'object'
+      ? (relatesTo['m.in_reply_to'] as Readonly<Record<string, unknown>>)
+      : undefined;
+  const relationEventId =
+    typeof relatesTo?.event_id === 'string'
+      ? relatesTo.event_id
+      : typeof replyMetadata?.event_id === 'string'
+        ? replyMetadata.event_id
+        : undefined;
+  const relationKind =
+    relatesTo?.rel_type === 'm.thread'
+      ? 'thread'
+      : relationEventId === undefined
+        ? 'independent'
+        : 'reply';
+  return { relationKind, ...(relationEventId === undefined ? {} : { relationEventId }) };
+}
+
+function editPreview(content: Readonly<Record<string, unknown>>): string {
+  const newContent =
+    content['m.new_content'] && typeof content['m.new_content'] === 'object'
+      ? (content['m.new_content'] as Readonly<Record<string, unknown>>)
+      : undefined;
+  return boundedPreview(newContent?.body ?? content.body);
 }
 
 export function normalizeEnvelope(
@@ -115,6 +186,58 @@ export function normalizeEnvelope(
     content['m.relates_to'] && typeof content['m.relates_to'] === 'object'
       ? (content['m.relates_to'] as Readonly<Record<string, unknown>>)
       : undefined;
+  if (event.decryptionUpdate === 'failure') {
+    return {
+      kind: 'maintenance',
+      mutation: 'decryption_failure',
+      accountId: envelope.accountId,
+      targetEventId: event.eventId,
+      roomId: event.roomId,
+      detectedAt: envelope.detectedAt,
+      decryptionFailureCode: event.decryptionFailureCode ?? 'UNKNOWN_ERROR',
+    };
+  }
+  if (event.decryptionUpdate === 'success') {
+    const messageType = content.msgtype;
+    if (event.type !== 'm.room.message' || typeof messageType !== 'string') {
+      return {
+        kind: 'issue',
+        code: 'decryption_failure',
+        detail: 'Decryption produced an unsupported or malformed clear event.',
+        eventId: event.eventId,
+        roomId: event.roomId,
+        detectedAt: envelope.detectedAt,
+      };
+    }
+    if (relatesTo?.rel_type === 'm.replace' && typeof relatesTo.event_id === 'string') {
+      return {
+        kind: 'maintenance',
+        mutation: 'edit',
+        accountId: envelope.accountId,
+        targetEventId: relatesTo.event_id,
+        roomId: event.roomId,
+        detectedAt: envelope.detectedAt,
+        preview: editPreview(content),
+      };
+    }
+    const media = mediaMetadata(content);
+    return {
+      kind: 'maintenance',
+      mutation: 'decryption_success',
+      accountId: envelope.accountId,
+      targetEventId: event.eventId,
+      roomId: event.roomId,
+      detectedAt: envelope.detectedAt,
+      preview:
+        messageType === 'm.image' || messageType === 'm.file'
+          ? boundedPreview(content.filename ?? content.body) || 'Attachment'
+          : boundedPreview(content.body),
+      messageType: supportedMessageTypes.has(messageType as SupportedActivity['messageType'])
+        ? (messageType as SupportedActivity['messageType'])
+        : 'm.encrypted',
+      ...(media === undefined ? {} : { media }),
+    };
+  }
   if (event.type === 'm.room.redaction' && event.redacts) {
     return {
       kind: 'maintenance',
@@ -126,14 +249,10 @@ export function normalizeEnvelope(
     };
   }
   if (
-    event.type === 'm.room.message' &&
+    (event.type === 'm.room.message' || event.type === 'm.room.encrypted') &&
     relatesTo?.rel_type === 'm.replace' &&
     typeof relatesTo.event_id === 'string'
   ) {
-    const newContent =
-      content['m.new_content'] && typeof content['m.new_content'] === 'object'
-        ? (content['m.new_content'] as Readonly<Record<string, unknown>>)
-        : undefined;
     return {
       kind: 'maintenance',
       mutation: 'edit',
@@ -141,7 +260,9 @@ export function normalizeEnvelope(
       targetEventId: relatesTo.event_id,
       roomId: event.roomId,
       detectedAt: envelope.detectedAt,
-      preview: boundedPreview(newContent?.body ?? content.body),
+      // An encrypted replacement carries no readable body until its own decryption
+      // arrives; marking the target edited must not blank the preview meanwhile.
+      ...(event.type === 'm.room.encrypted' ? {} : { preview: editPreview(content) }),
     };
   }
 
@@ -158,13 +279,26 @@ export function normalizeEnvelope(
   }
 
   if (event.type === 'm.room.encrypted') {
+    const failed = event.decryptionFailureCode !== undefined;
+    // Relation information is lifted out of the ciphertext into the cleartext wire
+    // content, so an encrypted thread reply groups by root from its placeholder on.
+    const relation = relationOf(relatesTo);
     return {
-      kind: 'issue',
-      code: 'encrypted_not_enabled',
-      detail: 'Encrypted activity is visible but deferred until the E2EE milestone.',
+      kind: 'activity',
+      accountId: envelope.accountId,
       eventId: event.eventId,
       roomId: event.roomId,
+      sender: event.sender,
+      eventType: 'm.room.encrypted',
+      messageType: 'm.encrypted',
+      preview: failed ? 'Encrypted message unavailable' : 'Encrypted message—waiting for keys',
       detectedAt: envelope.detectedAt,
+      localSequence: envelope.localSequence,
+      provenance: envelope.provenance,
+      contentState: failed ? 'unavailable' : 'encrypted_placeholder',
+      ...(failed ? { decryptionFailureCode: event.decryptionFailureCode } : {}),
+      ...relation,
+      ...(envelope.roomName === undefined ? {} : { roomName: envelope.roomName }),
     };
   }
 
@@ -181,22 +315,8 @@ export function normalizeEnvelope(
     messageType === 'm.image' || messageType === 'm.file'
       ? boundedPreview(content.filename ?? content.body) || 'Attachment'
       : boundedPreview(content.body);
-  const replyMetadata =
-    relatesTo?.['m.in_reply_to'] && typeof relatesTo['m.in_reply_to'] === 'object'
-      ? (relatesTo['m.in_reply_to'] as Readonly<Record<string, unknown>>)
-      : undefined;
-  const relationEventId =
-    typeof relatesTo?.event_id === 'string'
-      ? relatesTo.event_id
-      : typeof replyMetadata?.event_id === 'string'
-        ? replyMetadata.event_id
-        : undefined;
-  const relationKind =
-    relatesTo?.rel_type === 'm.thread'
-      ? 'thread'
-      : relationEventId === undefined
-        ? 'independent'
-        : 'reply';
+  const media = mediaMetadata(content);
+  const relation = relationOf(relatesTo);
 
   return {
     kind: 'activity',
@@ -211,8 +331,8 @@ export function normalizeEnvelope(
     localSequence: envelope.localSequence,
     provenance: envelope.provenance,
     contentState: 'clear',
-    relationKind,
-    ...(relationEventId === undefined ? {} : { relationEventId }),
+    ...(media === undefined ? {} : { media }),
+    ...relation,
     ...(envelope.roomName === undefined ? {} : { roomName: envelope.roomName }),
   };
 }

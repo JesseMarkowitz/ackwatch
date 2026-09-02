@@ -65,7 +65,7 @@ describe('normalization', () => {
     if (result.kind === 'activity') expect(Array.from(result.preview)).toHaveLength(160);
   });
 
-  it('turns malformed and encrypted events into visible issues', () => {
+  it('turns malformed events into issues and encrypted events into durable placeholders', () => {
     expect(
       normalizeEnvelope(envelope({ event: { type: 'm.room.message' } }), '@monitor:example.test'),
     ).toMatchObject({ kind: 'issue', code: 'malformed_event' });
@@ -74,7 +74,71 @@ describe('normalization', () => {
         envelope({ event: { ...envelope().event, type: 'm.room.encrypted' } }),
         '@monitor:example.test',
       ),
-    ).toMatchObject({ kind: 'issue', code: 'encrypted_not_enabled' });
+    ).toMatchObject({
+      kind: 'activity',
+      messageType: 'm.encrypted',
+      contentState: 'encrypted_placeholder',
+    });
+  });
+
+  it('records stable decryption failure reasons and late successful enrichment as maintenance', () => {
+    expect(
+      normalizeEnvelope(
+        envelope({
+          event: {
+            ...envelope().event,
+            type: 'm.room.encrypted',
+            decryptionFailureCode: 'MEGOLM_UNKNOWN_INBOUND_SESSION_ID',
+          },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({
+      kind: 'activity',
+      contentState: 'unavailable',
+      decryptionFailureCode: 'MEGOLM_UNKNOWN_INBOUND_SESSION_ID',
+    });
+    expect(
+      normalizeEnvelope(
+        envelope({
+          eligibleAtDelivery: false,
+          event: {
+            ...envelope().event,
+            wireType: 'm.room.encrypted',
+            decryptionUpdate: 'success',
+            content: { msgtype: 'm.text', body: 'Decrypted later' },
+          },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({
+      kind: 'maintenance',
+      mutation: 'decryption_success',
+      preview: 'Decrypted later',
+    });
+  });
+
+  it('extracts bounded safe image/file metadata without attachment bytes', () => {
+    const result = normalizeEnvelope(
+      envelope({
+        event: {
+          ...envelope().event,
+          content: {
+            msgtype: 'm.image',
+            body: 'diagram.png',
+            url: 'mxc://example.test/secret',
+            info: { mimetype: 'image/png', size: 42, w: 640, h: 480 },
+          },
+        },
+      }),
+      '@monitor:example.test',
+    );
+
+    expect(result).toMatchObject({
+      kind: 'activity',
+      media: { name: 'diagram.png', mimeType: 'image/png', size: 42, width: 640, height: 480 },
+    });
+    expect(JSON.stringify(result)).not.toContain('mxc://');
   });
 
   it('classifies stable threads separately from ordinary replies', () => {
@@ -108,6 +172,100 @@ describe('normalization', () => {
         '@monitor:example.test',
       ),
     ).toMatchObject({ kind: 'activity', relationKind: 'reply', relationEventId: '$parent' });
+  });
+
+  it('classifies encrypted relations from cleartext wire content', () => {
+    const encryptedEvent = (relatesTo: Record<string, unknown>) => ({
+      ...envelope().event,
+      type: 'm.room.encrypted',
+      content: {
+        algorithm: 'm.megolm.v1.aes-sha2',
+        ciphertext: 'AwgAEn…',
+        'm.relates_to': relatesTo,
+      },
+    });
+
+    expect(
+      normalizeEnvelope(
+        envelope({ event: encryptedEvent({ rel_type: 'm.thread', event_id: '$root' }) }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({
+      kind: 'activity',
+      contentState: 'encrypted_placeholder',
+      relationKind: 'thread',
+      relationEventId: '$root',
+    });
+    expect(
+      normalizeEnvelope(
+        envelope({ event: encryptedEvent({ 'm.in_reply_to': { event_id: '$parent' } }) }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({ kind: 'activity', relationKind: 'reply', relationEventId: '$parent' });
+    expect(
+      normalizeEnvelope(
+        envelope({
+          event: {
+            ...envelope().event,
+            type: 'm.room.encrypted',
+            content: { algorithm: 'm.megolm.v1.aes-sha2', ciphertext: 'AwgAEn…' },
+          },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({ kind: 'activity', relationKind: 'independent' });
+  });
+
+  it('treats an encrypted replacement as maintenance that cannot blank the preview', () => {
+    expect(
+      normalizeEnvelope(
+        envelope({
+          event: {
+            ...envelope().event,
+            type: 'm.room.encrypted',
+            content: {
+              algorithm: 'm.megolm.v1.aes-sha2',
+              ciphertext: 'AwgAEn…',
+              'm.relates_to': { rel_type: 'm.replace', event_id: '$original' },
+            },
+          },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toEqual({
+      kind: 'maintenance',
+      mutation: 'edit',
+      accountId: envelope().accountId,
+      targetEventId: '$original',
+      roomId: '!room:example.test',
+      detectedAt: 1_000,
+    });
+  });
+
+  it('routes a decrypted replacement to its target instead of enriching the edit event', () => {
+    expect(
+      normalizeEnvelope(
+        envelope({
+          event: {
+            ...envelope().event,
+            wireType: 'm.room.encrypted',
+            decryptionUpdate: 'success',
+            content: {
+              msgtype: 'm.text',
+              body: '* corrected text',
+              'm.relates_to': { rel_type: 'm.replace', event_id: '$original' },
+              'm.new_content': { msgtype: 'm.text', body: 'corrected text' },
+            },
+          },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({
+      kind: 'maintenance',
+      mutation: 'edit',
+      targetEventId: '$original',
+      preview: 'corrected text',
+    });
   });
 
   it('accepts edits and redactions as maintenance while monitoring is off', () => {

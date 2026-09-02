@@ -21,6 +21,17 @@ through an already established private channel and include only the minimum repr
 - Dependency versions are locked and audited. AGPL reference code is study-only and cannot be
   copied into this Apache-2.0 project.
 - HTTPS is required outside explicit loopback development.
+- Rust crypto state is account/device scoped in IndexedDB. Generated recovery keys and SAS values
+  are temporary UI state; secret-storage keys are zeroed from AckWatch memory on stop/logout.
+- Workflow storage contains only bounded previews and safe attachment metadata. Full decrypted
+  bodies are resolved on demand from the active Matrix SDK and are not placed in the alert outbox.
+- Webhook bearer tokens live in session storage, are excluded from settings export, diagnostics,
+  URLs, and payloads, and are cleared on logout. External payloads omit rooms, senders, previews,
+  attachment names, event URIs, raw events, and Matrix credentials.
+- Browser alert delivery is best effort while the page runs. Receivers must treat the deterministic
+  effect ID/ntfy sequence ID as a deduplication key rather than assuming exactly-once delivery.
 
-The tested deployment CSP will be derived from the actual Matrix crypto, worker, media, and
-webhook behavior during release hardening rather than copied speculatively into this foundation.
+The final production CSP remains a Phase 5 deployment task. It must allow only the deployed Matrix
+origin and operator-approved webhook origins in `connect-src`, retain local-only script/font/media
+directives, and permit the bundled Rust crypto WASM without enabling remote code. A browser CORS
+failure is reported as transport failure; it is never worked around by weakening unrelated policy.

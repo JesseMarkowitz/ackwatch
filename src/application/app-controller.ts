@@ -15,6 +15,14 @@ import {
 } from '../domain/ingestion';
 import type { QueueActivity, QueueCommand, QueueItem } from '../domain/queue';
 import {
+  BrowserAlertCoordinator,
+  type AlertChannelsSnapshot,
+  type BrowserAlertCoordinatorPort,
+} from './browser-alert-coordinator';
+import type { AlertRepositoryPort } from './alert-dispatcher';
+import type { EventDetail } from './event-detail';
+import { initialCryptoSnapshot, type CryptoSnapshot } from './crypto-status';
+import {
   BrowserStorageHealth,
   type BrowserStorageSnapshot,
 } from '../infrastructure/browser/storage-health';
@@ -25,6 +33,7 @@ import { MatrixRuntime } from '../infrastructure/matrix/matrix-runtime';
 import { CoverageIssueRepository } from '../infrastructure/persistence/coverage-issue-repository';
 import {
   WorkflowRepository,
+  defaultAccountSettings,
   type AcceptedActivityInput,
   type StorageHealth,
   type WorkflowProjection,
@@ -47,6 +56,9 @@ export interface AppSnapshot {
   readonly queueActivities: readonly QueueActivity[];
   readonly storage: BrowserStorageSnapshot;
   readonly settings?: AccountSettingsRecord;
+  readonly alerts: AlertChannelsSnapshot;
+  readonly alertDeliveries?: WorkflowProjection['deliveries'];
+  readonly crypto: CryptoSnapshot;
   readonly error?: string;
 }
 
@@ -63,6 +75,19 @@ export interface AckWatchControllerPort {
   requestPersistentStorage(): Promise<void>;
   exportSettings(): Promise<string | undefined>;
   importSettings(serialized: string): Promise<void>;
+  updateSettings(patch: Partial<AccountSettingsRecord>): Promise<void>;
+  requestNotificationPermission(): Promise<void>;
+  setWebhookToken(token: string): void;
+  sendTestWebhook(): Promise<void>;
+  retryAlertDelivery(deliveryId: string): Promise<void>;
+  resolveEventDetail(roomId: string, eventId: string): Promise<EventDetail>;
+  bootstrapCryptoSecurity(password: string, recoveryPassphrase?: string): Promise<string>;
+  restoreCryptoSecurity(recoveryKey: string): Promise<void>;
+  requestOwnDeviceVerification(): Promise<void>;
+  acceptVerificationRequest(): Promise<void>;
+  startSasVerification(): Promise<void>;
+  confirmSasVerification(matches: boolean): Promise<void>;
+  cancelOwnDeviceVerification(): Promise<void>;
   logout(): Promise<void>;
 }
 
@@ -79,6 +104,13 @@ export interface AppControllerDependencies {
   readonly createWorkflowRepository?: (
     onStorageHealth: (health: StorageHealth) => void,
   ) => WorkflowRepositoryPort;
+  readonly createAlertCoordinator?: (options: {
+    readonly repository: WorkflowRepositoryPort;
+    readonly accountId: string;
+    readonly clock: Clock;
+    readonly getSettings: () => AccountSettingsRecord;
+    readonly onChange: () => void;
+  }) => BrowserAlertCoordinatorPort;
 }
 
 export interface BrowserStorageHealthPort {
@@ -86,15 +118,13 @@ export interface BrowserStorageHealthPort {
   requestPersistence(): Promise<BrowserStorageSnapshot>;
 }
 
-export interface WorkflowRepositoryPort {
+export interface WorkflowRepositoryPort extends AlertRepositoryPort {
   open(): Promise<void>;
   acceptActivity(input: AcceptedActivityInput): Promise<unknown>;
   applyMaintenance(
     accountId: string,
     targetEventId: string,
-    command:
-      | { readonly kind: 'apply_edit'; readonly preview: string }
-      | { readonly kind: 'apply_redaction' },
+    command: Parameters<WorkflowRepository['applyMaintenance']>[2],
   ): Promise<boolean>;
   recordIngestionIssue(
     issue: Parameters<WorkflowRepository['recordIngestionIssue']>[0],
@@ -104,8 +134,10 @@ export interface WorkflowRepositoryPort {
   applyCommand(accountId: string, itemId: string, command: QueueCommand): Promise<void>;
   projection(accountId: string): Promise<WorkflowProjection>;
   getSettings(accountId: string): Promise<AccountSettingsRecord>;
+  putSettings(settings: AccountSettingsRecord): Promise<void>;
   exportSettings(accountId: string): Promise<string>;
   importSettings(accountId: string, serialized: string): Promise<AccountSettingsRecord>;
+  retryAlertDelivery(accountId: string, deliveryId: string, now: number): Promise<void>;
   close(): void;
 }
 
@@ -114,6 +146,14 @@ export interface MatrixRuntimePort {
   stop(): Promise<void>;
   logout(): Promise<void>;
   retryCoverageIssues(): Promise<void>;
+  resolveEventDetail?(roomId: string, eventId: string): Promise<EventDetail>;
+  bootstrapCryptoSecurity?(password: string, recoveryPassphrase?: string): Promise<string>;
+  restoreCryptoSecurity?(recoveryKey: string): Promise<void>;
+  requestOwnDeviceVerification?(): Promise<CryptoSnapshot>;
+  acceptVerificationRequest?(): Promise<CryptoSnapshot>;
+  startSasVerification?(): Promise<CryptoSnapshot>;
+  confirmSasVerification?(matches: boolean): Promise<void>;
+  cancelOwnDeviceVerification?(): Promise<void>;
 }
 
 export class AckWatchController implements AckWatchControllerPort {
@@ -130,6 +170,9 @@ export class AckWatchController implements AckWatchControllerPort {
   private readonly createWorkflowRepository: (
     onStorageHealth: (health: StorageHealth) => void,
   ) => WorkflowRepositoryPort;
+  private readonly createAlertCoordinator: NonNullable<
+    AppControllerDependencies['createAlertCoordinator']
+  >;
   private readonly ledger = new DeveloperLedger();
   private readonly listeners = new Set<() => void>();
   private phase: AppPhase = 'signed_out';
@@ -144,6 +187,7 @@ export class AckWatchController implements AckWatchControllerPort {
     activities: [],
     transitions: [],
     effects: [],
+    deliveries: [],
     quarantineCount: 0,
   };
   private storageSnapshot: BrowserStorageSnapshot = {
@@ -152,6 +196,8 @@ export class AckWatchController implements AckWatchControllerPort {
   };
   private accountSettings: AccountSettingsRecord | undefined;
   private monitoringSessionId: string | undefined;
+  private alerts: BrowserAlertCoordinatorPort | undefined;
+  private cryptoSnapshot: CryptoSnapshot = initialCryptoSnapshot;
   private currentSnapshot: AppSnapshot;
 
   public constructor(dependencies: AppControllerDependencies = {}) {
@@ -173,6 +219,16 @@ export class AckWatchController implements AckWatchControllerPort {
       dependencies.createWorkflowRepository ??
       ((onStorageHealth) =>
         new WorkflowRepository('ackwatch-workflow', undefined, undefined, onStorageHealth));
+    this.createAlertCoordinator =
+      dependencies.createAlertCoordinator ??
+      ((options) =>
+        new BrowserAlertCoordinator(
+          options.repository,
+          options.accountId,
+          options.clock,
+          options.getSettings,
+          { onChange: options.onChange },
+        ));
     this.currentSnapshot = this.buildSnapshot();
   }
 
@@ -227,6 +283,7 @@ export class AckWatchController implements AckWatchControllerPort {
   }
 
   public startMonitoring(): void {
+    void this.alerts?.prepareForMonitoring();
     try {
       this.coverage.startMonitoring();
       this.error = undefined;
@@ -279,6 +336,96 @@ export class AckWatchController implements AckWatchControllerPort {
     this.emit();
   }
 
+  public async updateSettings(patch: Partial<AccountSettingsRecord>): Promise<void> {
+    const accountId = this.credentials?.accountId;
+    if (!accountId || !this.workflow || !this.accountSettings) return;
+    const next: AccountSettingsRecord = {
+      ...this.accountSettings,
+      ...patch,
+      accountId,
+      schemaVersion: 2,
+      updatedAt: this.clock.now(),
+    };
+    await this.workflow.putSettings(next);
+    this.accountSettings = await this.workflow.getSettings(accountId);
+    this.emit();
+  }
+
+  public async requestNotificationPermission(): Promise<void> {
+    await this.alerts?.requestNotificationPermission();
+    this.emit();
+  }
+
+  public setWebhookToken(token: string): void {
+    this.alerts?.setWebhookToken(token);
+  }
+
+  public async sendTestWebhook(): Promise<void> {
+    await this.alerts?.sendTestWebhook();
+    this.emit();
+  }
+
+  public async retryAlertDelivery(deliveryId: string): Promise<void> {
+    const accountId = this.credentials?.accountId;
+    if (!accountId || !this.workflow) return;
+    await this.workflow.retryAlertDelivery(accountId, deliveryId, this.clock.now());
+    await this.alerts?.dispatch();
+    await this.refreshWorkflow();
+    this.emit();
+  }
+
+  public async resolveEventDetail(roomId: string, eventId: string): Promise<EventDetail> {
+    return (
+      (await this.runtime?.resolveEventDetail?.(roomId, eventId)) ?? {
+        availability: 'unavailable',
+        roomId,
+        eventId,
+        reason: 'client_unavailable',
+        detail: 'Full detail is unavailable outside the active Matrix session.',
+      }
+    );
+  }
+
+  public async bootstrapCryptoSecurity(
+    password: string,
+    recoveryPassphrase?: string,
+  ): Promise<string> {
+    if (!this.runtime?.bootstrapCryptoSecurity) throw new Error('Crypto is not available.');
+    return await this.runtime.bootstrapCryptoSecurity(password, recoveryPassphrase);
+  }
+
+  public async restoreCryptoSecurity(recoveryKey: string): Promise<void> {
+    if (!this.runtime?.restoreCryptoSecurity) throw new Error('Crypto is not available.');
+    await this.runtime.restoreCryptoSecurity(recoveryKey);
+  }
+
+  public async requestOwnDeviceVerification(): Promise<void> {
+    if (!this.runtime?.requestOwnDeviceVerification) throw new Error('Crypto is not available.');
+    this.cryptoSnapshot = await this.runtime.requestOwnDeviceVerification();
+    this.emit();
+  }
+
+  public async acceptVerificationRequest(): Promise<void> {
+    if (!this.runtime?.acceptVerificationRequest) throw new Error('Crypto is not available.');
+    this.cryptoSnapshot = await this.runtime.acceptVerificationRequest();
+    this.emit();
+  }
+
+  public async startSasVerification(): Promise<void> {
+    if (!this.runtime?.startSasVerification) throw new Error('Crypto is not available.');
+    this.cryptoSnapshot = await this.runtime.startSasVerification();
+    this.emit();
+  }
+
+  public async confirmSasVerification(matches: boolean): Promise<void> {
+    if (!this.runtime?.confirmSasVerification) throw new Error('Crypto is not available.');
+    await this.runtime.confirmSasVerification(matches);
+  }
+
+  public async cancelOwnDeviceVerification(): Promise<void> {
+    await this.runtime?.cancelOwnDeviceVerification?.();
+  }
+
   public async retryCoverage(): Promise<void> {
     if (!this.runtime) return;
     this.error = undefined;
@@ -299,6 +446,9 @@ export class AckWatchController implements AckWatchControllerPort {
       await this.credentialStore.clear();
       await this.lease?.release();
       this.runtime = undefined;
+      this.alerts?.clearWebhookToken();
+      this.alerts?.stop();
+      this.alerts = undefined;
       this.workflow?.close();
       this.workflow = undefined;
       this.lease = undefined;
@@ -310,9 +460,11 @@ export class AckWatchController implements AckWatchControllerPort {
         activities: [],
         transitions: [],
         effects: [],
+        deliveries: [],
         quarantineCount: 0,
       };
       this.accountSettings = undefined;
+      this.cryptoSnapshot = initialCryptoSnapshot;
       this.phase = 'signed_out';
       this.coverage.signOut();
       this.emit();
@@ -323,6 +475,7 @@ export class AckWatchController implements AckWatchControllerPort {
     this.coverage.stopMonitoring();
     await this.endMonitoringSession('page_teardown');
     await this.runtime?.stop();
+    this.alerts?.stop();
     this.workflow?.close();
     await this.lease?.release();
   }
@@ -340,11 +493,13 @@ export class AckWatchController implements AckWatchControllerPort {
     }
     this.lease = lease;
 
+    let startupStage = 'browser storage inspection';
     try {
       this.storageSnapshot = await this.storageHealth.inspect();
       if (!this.storageSnapshot.available) {
         throw new Error(this.storageSnapshot.fault ?? 'Durable browser storage is unavailable.');
       }
+      startupStage = 'workflow storage open';
       const workflow = this.createWorkflowRepository((health) => {
         if (health.state === 'healthy') return;
         this.storageSnapshot = { ...this.storageSnapshot, fault: health.detail };
@@ -355,6 +510,22 @@ export class AckWatchController implements AckWatchControllerPort {
       await workflow.open();
       this.workflowProjection = await workflow.projection(credentials.accountId);
       this.accountSettings = await workflow.getSettings(credentials.accountId);
+      startupStage = 'alert coordinator initialization';
+      this.alerts = this.createAlertCoordinator({
+        repository: workflow,
+        accountId: credentials.accountId,
+        clock: this.clock,
+        getSettings: () =>
+          this.accountSettings ?? defaultAccountSettings(credentials.accountId, this.clock.now()),
+        onChange: () => {
+          void this.refreshWorkflow().then(
+            () => this.emit(),
+            (error: unknown) => this.handleWorkflowFailure(error),
+          );
+        },
+      });
+      this.alerts.start();
+      startupStage = 'Matrix runtime construction';
       const runtime = this.createRuntime({
         clock: this.clock,
         coverage: this.coverage,
@@ -364,9 +535,14 @@ export class AckWatchController implements AckWatchControllerPort {
         ledger: this.ledger,
         onChange: () => this.emit(),
         onNormalized: async (result) => this.handleNormalized(result),
+        onCryptoChange: (snapshot) => {
+          this.cryptoSnapshot = snapshot;
+          this.emit();
+        },
       });
       this.runtime = runtime;
       this.phase = 'active';
+      startupStage = 'Matrix runtime startup';
       await runtime.start();
       this.emit();
     } catch (error: unknown) {
@@ -374,10 +550,14 @@ export class AckWatchController implements AckWatchControllerPort {
       this.lease = undefined;
       this.runtime = undefined;
       this.workflow?.close();
+      this.alerts?.stop();
+      this.alerts = undefined;
       this.workflow = undefined;
       this.phase = 'error';
       this.coverage.fatal(
-        error instanceof Error ? error.message : 'Matrix client startup failed safely.',
+        error instanceof Error
+          ? `${startupStage}: ${error.message}`
+          : `${startupStage}: Matrix client startup failed safely.`,
       );
       this.error = this.coverage.snapshot().fault ?? 'Matrix client startup failed safely.';
       this.emit();
@@ -401,6 +581,10 @@ export class AckWatchController implements AckWatchControllerPort {
         localSequence: result.localSequence,
         provenance: result.provenance,
         contentState: result.contentState,
+        ...(result.decryptionFailureCode === undefined
+          ? {}
+          : { decryptionFailureCode: result.decryptionFailureCode }),
+        ...(result.media === undefined ? {} : { media: result.media }),
         relationKind: result.relationKind,
         ...(result.relationEventId === undefined
           ? {}
@@ -408,16 +592,30 @@ export class AckWatchController implements AckWatchControllerPort {
         ...(result.roomName === undefined ? {} : { roomName: result.roomName }),
       });
       await this.refreshWorkflow();
+      void this.alerts?.dispatch().catch((error: unknown) => this.handleAlertFailure(error));
       return;
     }
     if (result.kind === 'maintenance') {
-      await workflow.applyMaintenance(
-        accountId,
-        result.targetEventId,
+      const command =
         result.mutation === 'edit'
-          ? { kind: 'apply_edit', preview: result.preview ?? '' }
-          : { kind: 'apply_redaction' },
-      );
+          ? ({
+              kind: 'apply_edit',
+              ...(result.preview === undefined ? {} : { preview: result.preview }),
+            } as const)
+          : result.mutation === 'redaction'
+            ? ({ kind: 'apply_redaction' } as const)
+            : result.mutation === 'decryption_success'
+              ? ({
+                  kind: 'enrich_decrypted_content',
+                  preview: result.preview ?? '',
+                  ...(result.messageType === undefined ? {} : { messageType: result.messageType }),
+                  ...(result.media === undefined ? {} : { media: result.media }),
+                } as const)
+              : ({
+                  kind: 'record_decryption_failure',
+                  reasonCode: result.decryptionFailureCode ?? 'UNKNOWN_ERROR',
+                } as const);
+      await workflow.applyMaintenance(accountId, result.targetEventId, command);
       await this.refreshWorkflow();
       return;
     }
@@ -460,6 +658,11 @@ export class AckWatchController implements AckWatchControllerPort {
     this.emit();
   }
 
+  private handleAlertFailure(error: unknown): void {
+    this.error = error instanceof Error ? error.message : 'Alert dispatch failed.';
+    this.emit();
+  }
+
   private emit(): void {
     this.currentSnapshot = this.buildSnapshot();
     for (const listener of this.listeners) listener();
@@ -480,6 +683,13 @@ export class AckWatchController implements AckWatchControllerPort {
       queueItems: this.workflowProjection.items,
       queueActivities: this.workflowProjection.activities,
       storage: this.storageSnapshot,
+      alerts: this.alerts?.snapshot() ?? {
+        audio: 'disabled',
+        notifications: 'disabled',
+        webhook: 'disabled',
+      },
+      alertDeliveries: this.workflowProjection.deliveries,
+      crypto: this.cryptoSnapshot,
       ...(this.accountSettings === undefined ? {} : { settings: this.accountSettings }),
       ...(this.error === undefined ? {} : { error: this.error }),
     };

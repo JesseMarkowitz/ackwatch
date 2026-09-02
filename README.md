@@ -3,10 +3,13 @@
 AckWatch is a local-first attention monitor for Matrix. It is an independent open-source
 project and is not endorsed by The Matrix.org Foundation or Element.
 
-The application is at the Phase 3 workflow-alpha gate. It supports session-only password login,
+The application is at the Phase 4 reliability-beta gate. It supports session-only password login,
 exclusive account ownership, a network-confirmed monitoring boundary, serial event intake, and a
 durable attention workflow with thread merge, deadlines, settings transfer, storage health, and
-reload restoration. Monitoring still returns off after every reload.
+reload restoration. Phase 4 adds end-to-end encryption with a persistent device — cross-signing,
+secret storage, key backup, and emoji device verification — the complete V1 event table, and
+durable alert delivery through bundled audio, browser notifications, and an optional generic or
+ntfy-compatible webhook. Monitoring still returns off after every reload.
 
 ## Requirements
 
@@ -38,14 +41,17 @@ npm run build
 npm run test:browser
 npm run test:visual
 npm run test:matrix:local
+npm run test:webhook:local
 npm run audit:secrets
 npm run audit:tracked
 npm run audit:dependencies
 npm run report:licenses
 ```
 
-`npm run check:gate3` runs the complete Phase 3 sequence. Generated reports, screenshots, traces, and the
-HTML gallery are written beneath ignored `artifacts/`.
+`npm run check:gate4` runs the complete Phase 4 sequence. It needs Docker for the disposable Synapse
+and ntfy stacks, and it records each step as it passes so the generated report reflects what actually
+ran. Generated reports, screenshots, traces, and the HTML gallery are written beneath ignored
+`artifacts/`.
 
 See [Testing](./docs/TESTING.md), [Architecture](./docs/ARCHITECTURE.md), and the
 [ADR index](./docs/adr/README.md) for the decisions behind the implementation.

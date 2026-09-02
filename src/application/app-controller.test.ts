@@ -61,6 +61,21 @@ function durableDependencies() {
     },
     createWorkflowRepository: (onHealth: ConstructorParameters<typeof WorkflowRepository>[3]) =>
       new WorkflowRepository(`controller-${crypto.randomUUID()}`, undefined, undefined, onHealth),
+    createAlertCoordinator: () => ({
+      start: () => undefined,
+      stop: () => undefined,
+      dispatch: async () => undefined,
+      prepareForMonitoring: async () => undefined,
+      requestNotificationPermission: async () => undefined,
+      sendTestWebhook: async () => undefined,
+      setWebhookToken: () => undefined,
+      clearWebhookToken: () => undefined,
+      snapshot: () => ({
+        audio: 'disabled' as const,
+        notifications: 'disabled' as const,
+        webhook: 'disabled' as const,
+      }),
+    }),
   };
 }
 

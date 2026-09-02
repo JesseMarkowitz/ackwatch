@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 import type { AppSnapshot } from '../../application/app-controller';
 import { App } from '../../app/App';
 import type { QueueActivity, QueueItem } from '../../domain/queue';
+import { defaultAccountSettings } from '../../infrastructure/persistence/workflow-repository';
 
 const baseCoverage: AppSnapshot['coverage'] = {
   connection: 'ready',
@@ -29,6 +30,14 @@ const signedOut: AppSnapshot = {
   queueItems: [],
   queueActivities: [],
   storage: { available: true, persistenceSupported: true, persistent: false },
+  alerts: { audio: 'disabled', notifications: 'disabled', webhook: 'disabled' },
+  crypto: {
+    state: 'off',
+    crossSigningReady: false,
+    secretStorageReady: false,
+    keyBackupReady: false,
+    verification: 'idle',
+  },
 };
 
 const active = (coverage: Partial<AppSnapshot['coverage']> = {}): AppSnapshot => ({
@@ -42,6 +51,26 @@ const active = (coverage: Partial<AppSnapshot['coverage']> = {}): AppSnapshot =>
   queueItems: [],
   queueActivities: [],
   storage: { available: true, persistenceSupported: true, persistent: false },
+  alerts: {
+    audio: 'permission_required',
+    notifications: 'permission_required',
+    webhook: 'disabled',
+  },
+  crypto: {
+    state: 'ready',
+    crossSigningReady: false,
+    secretStorageReady: false,
+    keyBackupReady: false,
+    verification: 'idle',
+  },
+  settings: {
+    ...defaultAccountSettings(
+      '@operator:example.test|https://matrix.example.test',
+      Date.UTC(2026, 7, 31, 13, 40),
+    ),
+    audioEnabled: true,
+    browserNotificationsEnabled: true,
+  },
 });
 
 const receivedAt = Date.UTC(2026, 7, 31, 13, 42);
@@ -98,6 +127,15 @@ const queueItem = (id: string, status: QueueItem['status']): QueueItem => ({
 const attentionItem = queueItem('attention', 'NEW');
 const openItem = queueItem('open', 'ACKNOWLEDGED');
 const completedItem = queueItem('completed', 'COMPLETED');
+const encryptedItem = queueItem('encrypted', 'NEW');
+const overdueItem: QueueItem = {
+  ...queueItem('overdue', 'UNACKNOWLEDGED'),
+  deadline: {
+    kind: 'unacknowledged',
+    firstAt: receivedAt - 60_000,
+    repeatEveryMs: 300_000,
+  },
+};
 const workflowActivities = [
   queueActivity(
     '$attention',
@@ -158,6 +196,98 @@ const fixtures = {
     ...active({ monitoring: 'armed' }),
     queueItems: [attentionItem, openItem, completedItem],
     queueActivities: workflowActivities,
+  },
+  overdue: {
+    ...active({ monitoring: 'armed' }),
+    queueItems: [overdueItem],
+    queueActivities: [
+      queueActivity('$overdue', overdueItem.id, 'Awaiting review past the first deadline.', 4),
+    ],
+    alertDeliveries: [
+      {
+        id: 'effect-overdue|webhook',
+        accountId: overdueItem.accountId,
+        effectId: 'effect-overdue',
+        itemId: overdueItem.id,
+        transport: 'webhook',
+        status: 'pending',
+        attemptCount: 1,
+        nextAttemptAt: receivedAt + 1_000,
+        updatedAt: receivedAt,
+        lastErrorCode: 'HTTP_429',
+      },
+    ],
+    alerts: { audio: 'ready', notifications: 'ready', webhook: 'retrying' },
+  },
+  'encrypted-placeholder': {
+    ...active({ monitoring: 'armed' }),
+    queueItems: [encryptedItem],
+    queueActivities: [
+      {
+        ...queueActivity(
+          '$encrypted',
+          encryptedItem.id,
+          'Encrypted message—waiting for room keys',
+          5,
+        ),
+        eventType: 'm.room.encrypted',
+        messageType: 'm.room.encrypted',
+        contentState: 'unavailable',
+        decryptionFailureCode: 'MEGOLM_UNKNOWN_INBOUND_SESSION_ID',
+      },
+    ],
+  },
+  'alerts-ready': {
+    ...active({ monitoring: 'armed' }),
+    alerts: { audio: 'ready', notifications: 'ready', webhook: 'ready' },
+    settings: {
+      ...active().settings!,
+      webhookEnabled: true,
+      webhookPreset: 'ntfy',
+      webhookEndpoint: 'https://alerts.example.test',
+      webhookTopic: 'ackwatch-synthetic',
+    },
+  },
+  'alert-faults': {
+    ...active({ monitoring: 'armed' }),
+    alerts: {
+      audio: 'fault',
+      notifications: 'fault',
+      webhook: 'fault',
+      audioDetail: 'Audio playback was blocked by the browser.',
+      notificationDetail: 'Notification permission is denied.',
+      webhookDetail: 'AUTHENTICATION_FAILED',
+    },
+    settings: {
+      ...active().settings!,
+      webhookEnabled: true,
+      webhookEndpoint: 'https://alerts.example.test/hook',
+    },
+    alertDeliveries: [
+      {
+        id: 'effect-fault|webhook',
+        accountId: overdueItem.accountId,
+        effectId: 'effect-fault',
+        itemId: overdueItem.id,
+        transport: 'webhook',
+        status: 'exhausted',
+        attemptCount: 4,
+        nextAttemptAt: receivedAt,
+        updatedAt: receivedAt,
+        lastErrorCode: 'AUTHENTICATION_FAILED',
+      },
+    ],
+  },
+  'crypto-fault': {
+    ...active({ connection: 'fatal_error' }),
+    crypto: {
+      state: 'fault',
+      crossSigningReady: false,
+      secretStorageReady: false,
+      keyBackupReady: false,
+      verification: 'idle',
+      detail: 'Rust crypto storage could not be initialized. Monitoring was disarmed.',
+    },
   },
   'storage-fault': {
     ...active({ connection: 'fatal_error' }),

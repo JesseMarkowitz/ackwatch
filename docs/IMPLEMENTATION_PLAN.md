@@ -1,6 +1,6 @@
 # AckWatch implementation plan
 
-Status: **Approved; Phase 3 implemented and awaiting Gate 3 review**
+Status: **Approved; Phase 3 accepted and Phase 4 authorized**
 
 Prepared: 2026-08-31  
 Normative input: [`SPECIFICATION.md`](./SPECIFICATION.md)  

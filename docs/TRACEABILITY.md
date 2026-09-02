@@ -35,3 +35,26 @@ The machine-readable Gate 2 report repeats the exact IDs and evidence groups in
 
 The machine-readable Gate 3 report repeats the exact IDs and evidence groups in
 `artifacts/reports/gate3-summary.json` after `npm run check:gate3`.
+
+## Phase 4 reliability beta
+
+| IDs                      | Gate 4 evidence                                                                             | Result / boundary                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| EVT-001–009              | `ingestion.test.ts`, `queue.test.ts`, repository tests, local Matrix controller             | Text/notice/emote, safe image/file metadata, encrypted placeholders/enrichment, edit/redaction maintenance, and explicit noise decisions pass. Encrypted relations are read from cleartext wire content, so an encrypted thread reply groups by root from its placeholder on and an encrypted replacement stays maintenance rather than becoming new work; both are proven against real E2EE traffic. |
+| ALT-001–007              | queue/repository deadline tests, `alert-dispatcher.test.ts`, local transport tests          | Deterministic effects, absolute wakeups, crash leases, audio unlock/faults, notification permission/tags, and best-effort semantics pass.                                                                                                                                                                                                                                                             |
+| ALT-008–016              | webhook unit/socket tests and digest-pinned self-hosted ntfy controller                     | Post-commit generic delivery, stable IDs, HTTPS/loopback rules, secret boundary, retry/exhaust/manual retry, status classification, and both presets pass.                                                                                                                                                                                                                                            |
+| UI-001, UI-010, UI-012   | app component tests, Phase 4 state catalog, real E2EE detail screenshot                     | Independent alert health, explicit unavailable encrypted detail, and live full-detail resolution pass without full-body workflow persistence.                                                                                                                                                                                                                                                         |
+| SEC-002–004, SEC-008–010 | storage schemas, credential stores, transport privacy assertions, production build audit    | Secrets/full bodies stay outside workflow and external payloads; webhook origin/CORS/CSP limitations remain explicit. Final deployed CSP qualification remains Phase 5.                                                                                                                                                                                                                               |
+| REL-005                  | repository crash/retry tests, encrypted reload/recovery, local Matrix and webhook manifests | Workflow/effect intent, crypto device state, decryption maintenance, and retryable alert state survive the tested reload/failure boundaries.                                                                                                                                                                                                                                                          |
+
+The machine-readable Gate 4 report repeats these evidence groups in
+`artifacts/reports/gate4-summary.json` after `npm run check:gate4`. That report derives its
+per-step results from markers each step records as it passes, and it fails when the Matrix run
+reports a browser error outside the documented rig noise, so a green summary cannot outrun its
+evidence.
+
+Two Phase 4 fault-injection items named in the implementation plan are not claimed here. A genuine
+cross-origin webhook denial is not exercised: the loopback receiver suites run outside the browser,
+so CORS refusal is covered by the transport's failure classification rather than by a real
+preflight rejection. The optional developer-provided homeserver run is explicitly skipped rather
+than passed when credentials are absent.

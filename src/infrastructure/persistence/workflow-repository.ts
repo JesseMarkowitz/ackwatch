@@ -20,6 +20,9 @@ import {
 } from '../../domain/queue';
 import {
   WorkflowDatabase,
+  type AlertAttemptRecord,
+  type AlertDeliveryRecord,
+  type AlertTransportKind,
   type AccountSettingsRecord,
   type ConversationRecord,
   type QuarantinedRecord,
@@ -66,6 +69,16 @@ const activitySchema: z.ZodType<QueueActivity> = z.object({
   localSequence: z.number().int().nonnegative(),
   provenance: z.string().min(1),
   contentState: z.enum(['clear', 'encrypted_placeholder', 'unavailable']),
+  decryptionFailureCode: z.string().min(1).optional(),
+  media: z
+    .object({
+      name: z.string().max(160),
+      mimeType: z.string().max(160).optional(),
+      size: z.number().int().nonnegative().optional(),
+      width: z.number().int().nonnegative().optional(),
+      height: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
   edited: z.boolean(),
   redacted: z.boolean(),
   relationKind: z.enum(['independent', 'thread', 'reply']),
@@ -100,9 +113,56 @@ const effectSchema: z.ZodType<AlertEffect> = z.object({
   kind: z.enum(['initial', 'reopen', 'unacknowledged', 'acknowledged']),
   stage: z.number().int().nonnegative(),
   dueAt: z.number().int().nonnegative(),
-  status: z.enum(['pending', 'cancelled']),
+  status: z.enum(['pending', 'delivered', 'cancelled']),
+});
+const deliverySchema: z.ZodType<AlertDeliveryRecord> = z.object({
+  id: z.string().min(1),
+  accountId: z.string().min(1),
+  effectId: z.string().min(1),
+  itemId: z.string().min(1),
+  transport: z.enum(['audio', 'browser_notification', 'webhook']),
+  status: z.enum(['pending', 'delivering', 'delivered', 'exhausted']),
+  attemptCount: z.number().int().nonnegative(),
+  nextAttemptAt: z.number().int().nonnegative(),
+  leaseUntil: z.number().int().nonnegative().optional(),
+  deliveredAt: z.number().int().nonnegative().optional(),
+  lastErrorCode: z.string().min(1).optional(),
+  updatedAt: z.number().int().nonnegative(),
+});
+const attemptSchema: z.ZodType<AlertAttemptRecord> = z.object({
+  id: z.string().min(1),
+  accountId: z.string().min(1),
+  effectId: z.string().min(1),
+  deliveryId: z.string().min(1),
+  transport: z.enum(['audio', 'browser_notification', 'webhook']),
+  attempt: z.number().int().positive(),
+  startedAt: z.number().int().nonnegative(),
+  finishedAt: z.number().int().nonnegative().optional(),
+  outcome: z.enum(['started', 'delivered', 'retry_scheduled', 'exhausted']),
+  responseStatus: z.number().int().min(100).max(599).optional(),
+  errorCode: z.string().min(1).optional(),
 });
 const settingsSchema: z.ZodType<AccountSettingsRecord> = z.object({
+  accountId: z.string().min(1),
+  schemaVersion: z.literal(2),
+  unacknowledgedAfterMs: z.number().int().positive(),
+  unacknowledgedRepeatMs: z.number().int().positive(),
+  acknowledgedAfterMs: z.number().int().positive(),
+  acknowledgedRepeatMs: z.number().int().positive(),
+  diagnosticsRetentionDays: z.number().int().min(1).max(3650),
+  previewPrivacy: z.enum(['short', 'generic']),
+  audioEnabled: z.boolean(),
+  audioVolume: z.number().min(0).max(1),
+  browserNotificationsEnabled: z.boolean(),
+  webhookEnabled: z.boolean(),
+  webhookPreset: z.enum(['generic', 'ntfy']),
+  webhookEndpoint: z.string().max(2048),
+  webhookTopic: z.string().max(256),
+  webhookTimeoutMs: z.number().int().min(1000).max(60_000),
+  webhookMaxAttempts: z.number().int().min(1).max(20),
+  updatedAt: z.number().int().nonnegative(),
+});
+const phaseThreeSettingsSchema = z.object({
   accountId: z.string().min(1),
   schemaVersion: z.literal(1),
   unacknowledgedAfterMs: z.number().int().positive(),
@@ -129,6 +189,8 @@ export interface AcceptedActivityInput {
   readonly localSequence: number;
   readonly provenance: string;
   readonly contentState?: QueueActivity['contentState'];
+  readonly decryptionFailureCode?: string;
+  readonly media?: QueueActivity['media'];
   readonly relationKind?: QueueActivity['relationKind'];
   readonly relationEventId?: string;
   readonly roomName?: string;
@@ -142,6 +204,7 @@ export interface WorkflowProjection {
   readonly activities: readonly QueueActivity[];
   readonly transitions: readonly WorkflowTransition[];
   readonly effects: readonly AlertEffect[];
+  readonly deliveries: readonly AlertDeliveryRecord[];
   readonly quarantineCount: number;
 }
 
@@ -170,13 +233,19 @@ function queueSettings(settings: AccountSettingsRecord): QueueSettings {
 export function defaultAccountSettings(accountId: string, now: number): AccountSettingsRecord {
   return {
     accountId,
-    schemaVersion: 1,
+    schemaVersion: 2,
     ...defaultQueueSettings,
     diagnosticsRetentionDays: 30,
     previewPrivacy: 'short',
     audioEnabled: false,
+    audioVolume: 0.8,
     browserNotificationsEnabled: false,
     webhookEnabled: false,
+    webhookPreset: 'generic',
+    webhookEndpoint: '',
+    webhookTopic: '',
+    webhookTimeoutMs: 10_000,
+    webhookMaxAttempts: 5,
     updatedAt: now,
   };
 }
@@ -321,6 +390,10 @@ export class WorkflowRepository {
             localSequence: input.localSequence,
             provenance: input.provenance,
             contentState: input.contentState ?? 'clear',
+            ...(input.decryptionFailureCode === undefined
+              ? {}
+              : { decryptionFailureCode: input.decryptionFailureCode }),
+            ...(input.media === undefined ? {} : { media: input.media }),
             edited: false,
             redacted: false,
             relationKind: input.relationKind ?? 'independent',
@@ -403,6 +476,7 @@ export class WorkflowRepository {
         this.database.queueItems,
         this.database.workflowTransitions,
         this.database.alertEffects,
+        this.database.alertDeliveries,
         this.database.settings,
       ],
       async () => {
@@ -419,7 +493,7 @@ export class WorkflowRepository {
         if (!mutation.changed) return;
         await this.database.queueItems.put(queueItemSchema.parse(mutation.item));
         if (command.kind === 'acknowledge' || command.kind === 'complete') {
-          await this.database.alertEffects
+          const cancelledEffects = await this.database.alertEffects
             .where('itemId')
             .equals(itemId)
             .filter(
@@ -428,7 +502,25 @@ export class WorkflowRepository {
                 effect.status === 'pending' &&
                 (command.kind === 'complete' || effect.kind === 'unacknowledged'),
             )
-            .modify({ status: 'cancelled' });
+            .primaryKeys();
+          if (cancelledEffects.length > 0) {
+            await this.database.alertEffects
+              .where('id')
+              .anyOf(cancelledEffects)
+              .modify({ status: 'cancelled' });
+            await this.database.alertDeliveries
+              .where('effectId')
+              .anyOf(cancelledEffects)
+              .filter(({ status }) => status === 'pending' || status === 'delivering')
+              .modify({ status: 'exhausted', lastErrorCode: 'EFFECT_CANCELLED' });
+          }
+          if (command.kind === 'complete') {
+            await this.database.alertDeliveries
+              .where('itemId')
+              .equals(itemId)
+              .filter(({ status }) => status === 'pending' || status === 'delivering')
+              .modify({ status: 'exhausted', lastErrorCode: 'WORKFLOW_COMPLETED' });
+          }
         }
         if (mutation.transition) {
           await this.database.workflowTransitions.add(transitionSchema.parse(mutation.transition));
@@ -459,6 +551,210 @@ export class WorkflowRepository {
           }
         }
         return inserted;
+      },
+    );
+  }
+
+  public async prepareDueAlertDeliveries(
+    accountId: string,
+    now: number,
+    transports: readonly AlertTransportKind[],
+  ): Promise<readonly AlertDeliveryRecord[]> {
+    await this.evaluateDeadlines(accountId, now);
+    return await this.database.transaction(
+      'rw',
+      [this.database.alertEffects, this.database.alertDeliveries],
+      async () => {
+        const effects = await this.database.alertEffects
+          .where('[accountId+status]')
+          .equals([accountId, 'pending'])
+          .filter(({ dueAt }) => dueAt <= now)
+          .toArray();
+        const ready: AlertDeliveryRecord[] = [];
+        for (const effect of effects.map((value) => effectSchema.parse(value))) {
+          if (transports.length === 0) {
+            await this.database.alertEffects.update(effect.id, { status: 'delivered' });
+            continue;
+          }
+          for (const transport of transports) {
+            const id = `${effect.id}|${transport}`;
+            let delivery = await this.database.alertDeliveries.get(id);
+            if (!delivery) {
+              delivery = deliverySchema.parse({
+                id,
+                accountId,
+                effectId: effect.id,
+                itemId: effect.itemId,
+                transport,
+                status: 'pending',
+                attemptCount: 0,
+                nextAttemptAt: effect.dueAt,
+                updatedAt: now,
+              });
+              await this.database.alertDeliveries.add(delivery);
+            }
+            const parsed = deliverySchema.parse(delivery);
+            if (
+              (parsed.status === 'pending' && parsed.nextAttemptAt <= now) ||
+              (parsed.status === 'delivering' && (parsed.leaseUntil ?? 0) <= now)
+            ) {
+              ready.push(parsed);
+            }
+          }
+        }
+        return ready;
+      },
+    );
+  }
+
+  public async claimAlertDelivery(
+    accountId: string,
+    deliveryId: string,
+    now: number,
+    leaseMs = 30_000,
+  ): Promise<AlertDeliveryRecord | undefined> {
+    return await this.database.transaction(
+      'rw',
+      [this.database.alertDeliveries, this.database.alertAttempts],
+      async () => {
+        const existing = this.parseOwnedDelivery(
+          accountId,
+          await this.database.alertDeliveries.get(deliveryId),
+        );
+        if (!existing) return undefined;
+        const claimable =
+          (existing.status === 'pending' && existing.nextAttemptAt <= now) ||
+          (existing.status === 'delivering' && (existing.leaseUntil ?? 0) <= now);
+        if (!claimable) return undefined;
+        const claimed = deliverySchema.parse({
+          ...existing,
+          status: 'delivering',
+          attemptCount: existing.attemptCount + 1,
+          leaseUntil: now + leaseMs,
+          updatedAt: now,
+        });
+        await this.database.alertDeliveries.put(claimed);
+        await this.database.alertAttempts.add(
+          attemptSchema.parse({
+            id: `${deliveryId}|${claimed.attemptCount}`,
+            accountId,
+            effectId: claimed.effectId,
+            deliveryId,
+            transport: claimed.transport,
+            attempt: claimed.attemptCount,
+            startedAt: now,
+            outcome: 'started',
+          }),
+        );
+        return claimed;
+      },
+    );
+  }
+
+  public async settleAlertDelivery(
+    accountId: string,
+    deliveryId: string,
+    result:
+      | { readonly status: 'delivered'; readonly at: number; readonly responseStatus?: number }
+      | {
+          readonly status: 'failed';
+          readonly at: number;
+          readonly errorCode: string;
+          readonly retryable: boolean;
+          readonly maxAttempts: number;
+          readonly responseStatus?: number;
+        },
+  ): Promise<AlertDeliveryRecord> {
+    return await this.database.transaction(
+      'rw',
+      [this.database.alertEffects, this.database.alertDeliveries, this.database.alertAttempts],
+      async () => {
+        const existing = this.parseOwnedDelivery(
+          accountId,
+          await this.database.alertDeliveries.get(deliveryId),
+        );
+        if (!existing || existing.status !== 'delivering') {
+          throw new Error('Alert delivery is not actively claimed.');
+        }
+        const willRetry =
+          result.status === 'failed' &&
+          result.retryable &&
+          existing.attemptCount < result.maxAttempts;
+        const next = deliverySchema.parse(
+          result.status === 'delivered'
+            ? {
+                ...existing,
+                status: 'delivered',
+                deliveredAt: result.at,
+                leaseUntil: undefined,
+                lastErrorCode: undefined,
+                updatedAt: result.at,
+              }
+            : {
+                ...existing,
+                status: willRetry ? 'pending' : 'exhausted',
+                nextAttemptAt: willRetry
+                  ? result.at + Math.min(60_000, 1_000 * 2 ** (existing.attemptCount - 1))
+                  : existing.nextAttemptAt,
+                leaseUntil: undefined,
+                lastErrorCode: result.errorCode,
+                updatedAt: result.at,
+              },
+        );
+        await this.database.alertDeliveries.put(next);
+        const attemptId = `${deliveryId}|${existing.attemptCount}`;
+        await this.database.alertAttempts.update(attemptId, {
+          finishedAt: result.at,
+          outcome:
+            result.status === 'delivered'
+              ? 'delivered'
+              : willRetry
+                ? 'retry_scheduled'
+                : 'exhausted',
+          ...(result.responseStatus === undefined ? {} : { responseStatus: result.responseStatus }),
+          ...(result.status === 'failed' ? { errorCode: result.errorCode } : {}),
+        });
+        const siblings = await this.database.alertDeliveries
+          .where('effectId')
+          .equals(existing.effectId)
+          .toArray();
+        if (
+          siblings.every(({ id, status }) =>
+            id === next.id
+              ? next.status === 'delivered' || next.status === 'exhausted'
+              : status === 'delivered' || status === 'exhausted',
+          )
+        ) {
+          await this.database.alertEffects.update(existing.effectId, { status: 'delivered' });
+        }
+        return next;
+      },
+    );
+  }
+
+  public async retryAlertDelivery(
+    accountId: string,
+    deliveryId: string,
+    now: number,
+  ): Promise<void> {
+    const existing = this.parseOwnedDelivery(
+      accountId,
+      await this.database.alertDeliveries.get(deliveryId),
+    );
+    if (!existing || existing.status !== 'exhausted') {
+      throw new Error('Only an exhausted alert delivery can be retried manually.');
+    }
+    await this.database.transaction(
+      'rw',
+      [this.database.alertEffects, this.database.alertDeliveries],
+      async () => {
+        await this.database.alertDeliveries.update(deliveryId, {
+          status: 'pending',
+          nextAttemptAt: now,
+          lastErrorCode: undefined,
+          updatedAt: now,
+        });
+        await this.database.alertEffects.update(existing.effectId, { status: 'pending' });
       },
     );
   }
@@ -518,7 +814,7 @@ export class WorkflowRepository {
 
   public async exportSettings(accountId: string): Promise<string> {
     const settings = await this.getSettings(accountId);
-    return JSON.stringify({ kind: 'ackwatch-settings', version: 1, settings }, null, 2);
+    return JSON.stringify({ kind: 'ackwatch-settings', version: 2, settings }, null, 2);
   }
 
   public async importSettings(
@@ -526,15 +822,24 @@ export class WorkflowRepository {
     serialized: string,
   ): Promise<AccountSettingsRecord> {
     const envelope = z
-      .object({
-        kind: z.literal('ackwatch-settings'),
-        version: z.literal(1),
-        settings: settingsSchema,
-      })
+      .discriminatedUnion('version', [
+        z.object({
+          kind: z.literal('ackwatch-settings'),
+          version: z.literal(1),
+          settings: phaseThreeSettingsSchema,
+        }),
+        z.object({
+          kind: z.literal('ackwatch-settings'),
+          version: z.literal(2),
+          settings: settingsSchema,
+        }),
+      ])
       .parse(JSON.parse(serialized));
     const imported = settingsSchema.parse({
+      ...defaultAccountSettings(accountId, this.now()),
       ...envelope.settings,
       accountId,
+      schemaVersion: 2,
       webhookEnabled: false,
       updatedAt: this.now(),
     });
@@ -559,6 +864,9 @@ export class WorkflowRepository {
     const effects = (
       await this.database.alertEffects.where('accountId').equals(accountId).toArray()
     ).map((effect) => effectSchema.parse(effect));
+    const deliveries = (
+      await this.database.alertDeliveries.where('accountId').equals(accountId).toArray()
+    ).map((delivery) => deliverySchema.parse(delivery));
     const quarantineCount = await this.database.quarantine
       .where('accountId')
       .equals(accountId)
@@ -573,6 +881,7 @@ export class WorkflowRepository {
       ),
       transitions,
       effects,
+      deliveries,
       quarantineCount,
     };
   }
@@ -586,6 +895,8 @@ export class WorkflowRepository {
         this.database.conversationKeys,
         this.database.workflowTransitions,
         this.database.alertEffects,
+        this.database.alertDeliveries,
+        this.database.alertAttempts,
         this.database.settings,
         this.database.monitoringSessions,
         this.database.ingestionIssues,
@@ -598,6 +909,8 @@ export class WorkflowRepository {
           this.database.conversationKeys.where('accountId').equals(accountId).delete(),
           this.database.workflowTransitions.where('accountId').equals(accountId).delete(),
           this.database.alertEffects.where('accountId').equals(accountId).delete(),
+          this.database.alertDeliveries.where('accountId').equals(accountId).delete(),
+          this.database.alertAttempts.where('accountId').equals(accountId).delete(),
           this.database.settings.delete(accountId),
           this.database.monitoringSessions.where('accountId').equals(accountId).delete(),
           this.database.ingestionIssues.where('accountId').equals(accountId).delete(),
@@ -622,6 +935,17 @@ export class WorkflowRepository {
     current: PersistenceFaultPoint,
   ): void {
     if (requested === current) throw new Error(`Injected transaction failure at ${current}.`);
+  }
+
+  private parseOwnedDelivery(
+    accountId: string,
+    value: AlertDeliveryRecord | undefined,
+  ): AlertDeliveryRecord | undefined {
+    if (!value) return undefined;
+    const parsed = deliverySchema.parse(value);
+    if (parsed.accountId !== accountId)
+      throw new Error('Alert delivery belongs to another account.');
+    return parsed;
   }
 
   private async mergeItems(

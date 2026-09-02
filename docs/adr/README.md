@@ -8,6 +8,7 @@
 - [ADR-0006: Acknowledged deadline does not slide](./0006-acknowledged-deadline.md)
 - [ADR-0007: Matrix SDK and truthful coverage boundary](./0007-matrix-sdk-and-coverage.md)
 - [ADR-0008: Durable workflow transactions and Matrix URIs](./0008-durable-workflow.md)
+- [ADR-0009: Rust crypto device state and durable alert delivery](./0009-crypto-and-alert-delivery.md)
 
 Records are accepted unless their own status says otherwise. Specification requirements remain
 normative when an ADR summarizes them.

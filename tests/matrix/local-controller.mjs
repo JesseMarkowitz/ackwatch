@@ -5,6 +5,9 @@ import { resolve } from 'node:path';
 import process from 'node:process';
 
 import { chromium } from '@playwright/test';
+import { createClient, SyncState } from 'matrix-js-sdk';
+import { CryptoEvent } from 'matrix-js-sdk/lib/crypto-api/CryptoEvent.js';
+import { VerificationPhase, VerifierEvent } from 'matrix-js-sdk/lib/crypto-api/verification.js';
 
 const root = resolve(import.meta.dirname, '../..');
 const stateDirectory = resolve(root, '.matrix-test-state/synapse');
@@ -25,9 +28,24 @@ const manifest = {
   eventIds: {},
   assertions: [],
   cleanup: [],
+  // Recorded verbatim, with the failing URL where the browser reports one, so the Gate 4 report
+  // can separate known rig noise from an unexplained application error.
+  browserErrors: [],
 };
+
+// Which part of the scenario was running when a browser error appeared. The report allows the
+// authorization failures that the deliberate account-wide logout provokes only inside that window,
+// so the same failures stay unexplained anywhere else in the run.
+let scenarioPhase = 'monitoring';
+
+function recordBrowserMessage(entry) {
+  manifest.browserErrors.push({ ...entry, phase: scenarioPhase });
+}
 let appServer;
 let browser;
+let activePage;
+let encryptedSender;
+let verificationPeer;
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -119,6 +137,61 @@ async function sendMessage(roomId, token, marker, content) {
   );
 }
 
+async function startEncryptedSender(session, roomId) {
+  const client = createClient({
+    baseUrl: homeserverUrl,
+    accessToken: session.access_token,
+    userId: session.user_id,
+    deviceId: session.device_id,
+    useAuthorizationHeader: true,
+  });
+  await client.initRustCrypto({ useIndexedDB: false });
+  client.startClient({ initialSyncLimit: 20 });
+  await waitFor(
+    'independent encrypted sender synchronization',
+    async () =>
+      (client.getSyncState() === SyncState.Prepared ||
+        client.getSyncState() === SyncState.Syncing) &&
+      client.getRoom(roomId) !== null,
+    45_000,
+  );
+  // Only the room creator holds the power level for state events. A later peer — the monitor's own
+  // second device, joined for self-verification — reuses this helper against an already encrypted
+  // room, so enabling encryption must stay the responsibility of whoever finds it disabled.
+  if (client.getRoom(roomId)?.hasEncryptionStateEvent() !== true) {
+    await client.sendStateEvent(
+      roomId,
+      'm.room.encryption',
+      { algorithm: 'm.megolm.v1.aes-sha2' },
+      '',
+    );
+  }
+  await waitFor(
+    'independent encrypted sender room state',
+    async () => client.getRoom(roomId)?.hasEncryptionStateEvent() === true,
+  );
+  return client;
+}
+
+async function waitForReady(page) {
+  const startButton = page.getByRole('button', { name: 'Start monitoring' });
+  await startButton.waitFor({ state: 'visible', timeout: 45_000 });
+  await Promise.race([
+    waitFor('network-confirmed ready state', async () => await startButton.isEnabled(), 45_000),
+    page
+      .locator('.fault-banner')
+      .waitFor({ state: 'visible', timeout: 45_000 })
+      .then(async () => {
+        throw new Error(`Startup fault: ${await page.locator('.fault-banner').innerText()}`);
+      }),
+  ]);
+  return startButton;
+}
+
+async function sendEncryptedMessage(client, roomId, content) {
+  return await client.sendEvent(roomId, 'm.room.message', content);
+}
+
 async function redactEvent(roomId, token, eventId, marker) {
   return await matrixRequest(
     `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/redact/${encodeURIComponent(eventId)}/${encodeURIComponent(`${runId}-${marker}`)}`,
@@ -192,9 +265,18 @@ async function main() {
     image,
     'generate',
   ]);
+  // The scenario signs the monitor in several times over — the controller's own session, the
+  // browser, and again as a fresh device after the deliberate account-wide logout — which exceeds
+  // Synapse's default login burst and answers 429. Rate limiting is a homeserver behaviour this
+  // suite does not qualify, so the disposable instance runs without it.
   appendFileSync(
     resolve(stateDirectory, 'homeserver.yaml'),
-    `\npublic_baseurl: "${homeserverUrl}/"\nsuppress_key_server_warning: true\n`,
+    `\npublic_baseurl: "${homeserverUrl}/"\nsuppress_key_server_warning: true\n` +
+      `rc_login:\n  address:\n    per_second: 1000\n    burst_count: 1000\n` +
+      `  account:\n    per_second: 1000\n    burst_count: 1000\n` +
+      `  failed_attempts:\n    per_second: 1000\n    burst_count: 1000\n` +
+      `rc_message:\n  per_second: 1000\n  burst_count: 1000\n` +
+      `rc_registration:\n  per_second: 1000\n  burst_count: 1000\n`,
   );
   const configuration = readFileSync(resolve(stateDirectory, 'homeserver.yaml'), 'utf8');
   const registrationSecret = /registration_shared_secret:\s*"([^"]+)"/.exec(configuration)?.[1];
@@ -241,15 +323,39 @@ async function main() {
   browser = await chromium.launch();
   const context = await browser.newContext({ locale: 'en-US', timezoneId: 'UTC' });
   const page = await context.newPage();
+  activePage = page;
+  page.on('pageerror', (error) => {
+    recordBrowserMessage({ name: error.name, message: error.message, stack: error.stack });
+  });
+  page.on('console', (message) => {
+    if (message.type() !== 'error') return;
+    recordBrowserMessage({ console: message.text(), url: message.location().url });
+  });
   await loginInBrowser(page, monitor.user_id, passwords.get('monitor'));
-  const startButton = page.getByRole('button', { name: 'Start monitoring' });
-  await startButton.waitFor({ state: 'visible', timeout: 45_000 });
-  await waitFor('network-confirmed ready state', async () => await startButton.isEnabled(), 45_000);
+  const startButton = await waitForReady(page);
   if ((await page.locator(`[data-event-id="${baseline.event_id}"]`).count()) !== 0) {
     throw new Error('The pre-arm baseline event entered the developer ledger.');
   }
   manifest.assertions.push('baseline-excluded');
   await page.screenshot({ path: resolve(artifactsDirectory, 'real-ready.png'), fullPage: true });
+
+  await page.getByText('Set up cross-signing, secret storage, and key backup').click();
+  await page
+    .getByLabel('Current Matrix password for one-time authorization')
+    .fill(passwords.get('monitor'));
+  await page.getByRole('button', { name: 'Create recovery and backup' }).click();
+  await page.getByText('Security setup completed. Save the recovery key now.').waitFor({
+    timeout: 60_000,
+  });
+  const recoveryKey = await page.locator('.recovery-key code').innerText();
+  if (!recoveryKey) throw new Error('AckWatch did not present the generated recovery key.');
+  await page.getByRole('button', { name: 'I saved it; clear from screen' }).click();
+  await page
+    .getByText('Key backup', { exact: true })
+    .locator('..')
+    .getByText('Enabled', { exact: true })
+    .waitFor();
+  manifest.assertions.push('cross-signing-secret-storage-key-backup-setup');
 
   await startButton.click();
   await page.getByText('Monitoring is armed').waitFor();
@@ -355,13 +461,116 @@ async function main() {
   await page.locator(`[data-event-id="${rearmed.event_id}"]`).waitFor({ timeout: 30_000 });
   manifest.assertions.push('rearm-accepts-only-new-activity');
 
+  const notice = await sendMessage(room.room_id, senderA.access_token, 'notice', {
+    msgtype: 'm.notice',
+    body: `Synthetic notice ${runId}`,
+  });
+  const emote = await sendMessage(room.room_id, senderA.access_token, 'emote', {
+    msgtype: 'm.emote',
+    body: `reviews the handoff ${runId}`,
+  });
+  const imageEvent = await sendMessage(room.room_id, senderA.access_token, 'image', {
+    msgtype: 'm.image',
+    body: `synthetic-${runId}.png`,
+    url: 'mxc://ackwatch.test/synthetic-image',
+    info: { mimetype: 'image/png', size: 1234, w: 64, h: 32 },
+  });
+  const fileEvent = await sendMessage(room.room_id, senderA.access_token, 'file', {
+    msgtype: 'm.file',
+    body: `synthetic-${runId}.txt`,
+    filename: 'handoff.txt',
+    url: 'mxc://ackwatch.test/synthetic-file',
+    info: { mimetype: 'text/plain', size: 42 },
+  });
+  const ordinaryReply = await sendMessage(room.room_id, senderA.access_token, 'ordinary-reply', {
+    msgtype: 'm.text',
+    body: `Synthetic ordinary reply ${runId}`,
+    'm.relates_to': { 'm.in_reply_to': { event_id: rearmed.event_id } },
+  });
+  for (const [name, event] of Object.entries({
+    notice,
+    emote,
+    image: imageEvent,
+    file: fileEvent,
+    ordinaryReply,
+  })) {
+    manifest.eventIds[name] = event.event_id;
+    await page.locator(`[data-event-id="${event.event_id}"]`).waitFor({ timeout: 30_000 });
+  }
+  const rearmedItemId = await page
+    .locator(`[data-event-id="${rearmed.event_id}"]`)
+    .getAttribute('data-item-id');
+  const ordinaryReplyItemId = await page
+    .locator(`[data-event-id="${ordinaryReply.event_id}"]`)
+    .getAttribute('data-item-id');
+  if (!rearmedItemId || !ordinaryReplyItemId || rearmedItemId === ordinaryReplyItemId) {
+    throw new Error('An ordinary m.in_reply_to reply was incorrectly grouped as a thread.');
+  }
+  manifest.assertions.push('complete-message-types-and-ordinary-reply');
+
+  encryptedSender = await startEncryptedSender(senderA, room.room_id);
+  const encryptedBody = `Synthetic encrypted activity ${runId}`;
+  const encryptedRoot = await sendEncryptedMessage(encryptedSender, room.room_id, {
+    msgtype: 'm.text',
+    body: encryptedBody,
+  });
+  manifest.eventIds.encryptedRoot = encryptedRoot.event_id;
+  const encryptedWire = await matrixRequest(
+    `/_matrix/client/v3/rooms/${encodeURIComponent(room.room_id)}/event/${encodeURIComponent(encryptedRoot.event_id)}`,
+    { token: senderA.access_token },
+  );
+  if (encryptedWire.type !== 'm.room.encrypted') {
+    throw new Error('The independent sender did not produce an encrypted wire event.');
+  }
+  const encryptedCard = page.locator(`[data-event-id="${encryptedRoot.event_id}"]`);
+  await encryptedCard.waitFor({ timeout: 45_000 });
+  await encryptedCard.getByText(encryptedBody, { exact: true }).waitFor({ timeout: 45_000 });
+  await encryptedCard.getByRole('button', { name: 'View details' }).click();
+  await page.getByRole('dialog').getByText(encryptedBody, { exact: true }).waitFor();
+  await page.getByRole('dialog').getByRole('button', { name: 'Close details' }).click();
+  const encryptedRootItemId = await encryptedCard.getAttribute('data-item-id');
+
+  const encryptedThreadBody = `Synthetic encrypted thread reply ${runId}`;
+  const encryptedThread = await sendEncryptedMessage(encryptedSender, room.room_id, {
+    msgtype: 'm.text',
+    body: encryptedThreadBody,
+    'm.relates_to': {
+      rel_type: 'm.thread',
+      event_id: encryptedRoot.event_id,
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: encryptedRoot.event_id },
+    },
+  });
+  manifest.eventIds.encryptedThread = encryptedThread.event_id;
+  const encryptedThreadCard = page.locator(`[data-event-id="${encryptedThread.event_id}"]`);
+  await encryptedThreadCard.waitFor({ timeout: 45_000 });
+  await encryptedThreadCard
+    .getByText(encryptedThreadBody, { exact: true })
+    .waitFor({ timeout: 45_000 });
+  const encryptedThreadItemId = await encryptedThreadCard.getAttribute('data-item-id');
+  if (!encryptedRootItemId || encryptedRootItemId !== encryptedThreadItemId) {
+    throw new Error('The encrypted thread reply did not group with its encrypted root.');
+  }
+  manifest.assertions.push('real-e2ee-text-thread-and-detail');
+  await page.screenshot({
+    path: resolve(artifactsDirectory, 'real-encrypted.png'),
+    fullPage: true,
+  });
+
   await page.reload();
   await page.getByRole('button', { name: 'Start monitoring' }).waitFor({ timeout: 45_000 });
   await page.getByText('Off', { exact: true }).first().waitFor();
   manifest.assertions.push('reload-unarmed');
   await page.locator(`[data-event-id="${reopenedReply.event_id}"]`).waitFor({ timeout: 30_000 });
   await page.locator(`[data-event-id="${rearmed.event_id}"]`).waitFor({ timeout: 30_000 });
+  await page.locator(`[data-event-id="${encryptedThread.event_id}"]`).waitFor({ timeout: 30_000 });
   manifest.assertions.push('reload-restores-workflow');
+  await page
+    .getByText('Crypto engine', { exact: true })
+    .locator('..')
+    .getByText('ready', { exact: true })
+    .waitFor({ timeout: 30_000 });
+  manifest.assertions.push('reload-restores-persistent-crypto-device');
 
   const secondPage = await context.newPage();
   await loginInBrowser(secondPage, monitor.user_id, passwords.get('monitor'));
@@ -371,8 +580,84 @@ async function main() {
     fullPage: true,
   });
   manifest.assertions.push('second-tab-blocked-before-store-open');
+  await secondPage.close();
 
-  await cleanupRoom(room.room_id, [monitor, senderA, senderB]);
+  // The browser signed in through the UI and owns its own device and access token, so logging out
+  // this controller's session would leave the monitored tab working. Invalidating every session for
+  // the account is what makes the app observe M_UNKNOWN_TOKEN, and it is why the browser rejoins
+  // below as a new device that must restore key backup.
+  scenarioPhase = 'token-invalidated';
+  await matrixRequest('/_matrix/client/v3/logout/all', {
+    method: 'POST',
+    token: monitor.access_token,
+    body: {},
+  });
+  await page.getByText(/M_UNKNOWN_TOKEN/u).waitFor({ timeout: 45_000 });
+  manifest.assertions.push('unknown-token-visible-and-fatal');
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await page.getByRole('heading', { name: 'Connect Matrix' }).waitFor({ timeout: 30_000 });
+  await loginInBrowser(page, monitor.user_id, passwords.get('monitor'));
+  await waitForReady(page);
+  // The replacement session is authorized again, so authorization failures stop being expected.
+  scenarioPhase = 'recovered-session';
+  await page.getByText('Restore from a recovery key').click();
+  await page.getByLabel('Recovery key').fill(recoveryKey);
+  await page.getByRole('button', { name: 'Restore security secrets' }).click();
+  await page.getByText('Recovery key accepted; crypto status refreshed.').waitFor({
+    timeout: 60_000,
+  });
+  await page
+    .getByText('Key backup', { exact: true })
+    .locator('..')
+    .getByText('Enabled', { exact: true })
+    .waitFor();
+  manifest.assertions.push('new-device-key-backup-restore');
+
+  const verificationSession = await login('monitor');
+  verificationPeer = await startEncryptedSender(verificationSession, room.room_id);
+  let peerRequest;
+  verificationPeer.on(CryptoEvent.VerificationRequestReceived, (request) => {
+    if (request.isSelfVerification) peerRequest = request;
+  });
+  await page.getByRole('button', { name: 'Verify this device' }).click();
+  await waitFor('verification request at independent device', () => peerRequest !== undefined);
+  await peerRequest.accept();
+  await page.getByRole('button', { name: 'Start emoji verification' }).waitFor({
+    timeout: 30_000,
+  });
+  await page.getByRole('button', { name: 'Start emoji verification' }).click();
+  await waitFor(
+    'independent SAS verifier',
+    () => peerRequest.phase === VerificationPhase.Started && peerRequest.verifier !== undefined,
+  );
+  let peerSas;
+  peerRequest.verifier.on(VerifierEvent.ShowSas, (callbacks) => {
+    peerSas = callbacks;
+  });
+  const peerVerification = peerRequest.verifier.verify();
+  await waitFor('independent SAS comparison', () => peerSas !== undefined);
+  await page.getByRole('group', { name: 'Device verification code' }).waitFor({
+    timeout: 30_000,
+  });
+  const browserEmoji = await page
+    .getByRole('group', { name: 'Device verification code' })
+    .locator('li')
+    .allTextContents();
+  const peerEmoji = peerSas.sas.emoji?.map(([symbol, name]) => `${symbol} ${name}`) ?? [];
+  if (browserEmoji.join('|') !== peerEmoji.join('|')) {
+    throw new Error('The independent device and AckWatch displayed different SAS emoji.');
+  }
+  await Promise.all([peerSas.confirm(), page.getByRole('button', { name: 'They match' }).click()]);
+  await peerVerification;
+  await page
+    .getByText('Device verification', { exact: true })
+    .locator('..')
+    .getByText('done', { exact: true })
+    .waitFor({ timeout: 30_000 });
+  manifest.assertions.push('own-device-emoji-sas-verification');
+  const replacementMonitor = await login('monitor');
+
+  await cleanupRoom(room.room_id, [replacementMonitor, senderA, senderB]);
   await context.close();
 }
 
@@ -383,6 +668,14 @@ try {
   manifest.result = 'fail';
   manifest.failure = error instanceof Error ? error.message : 'Unknown local Matrix failure.';
   try {
+    await activePage?.screenshot({
+      path: resolve(artifactsDirectory, 'real-failure.png'),
+      fullPage: true,
+    });
+  } catch {
+    // Preserve the original failure.
+  }
+  try {
     const logs = compose(['logs', '--no-color'], { capture: true });
     writeFileSync(resolve(artifactsDirectory, 'synapse.log'), logs);
   } catch {
@@ -390,6 +683,8 @@ try {
   }
   throw error;
 } finally {
+  encryptedSender?.stopClient();
+  verificationPeer?.stopClient();
   if (browser) await browser.close();
   if (appServer && !appServer.killed) appServer.kill('SIGTERM');
   try {

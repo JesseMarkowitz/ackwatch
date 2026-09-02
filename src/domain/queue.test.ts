@@ -262,6 +262,15 @@ describe('maintenance, ordering, URI, and thread identity', () => {
         { kind: 'enrich_decrypted_content', preview: 'clear' },
       ),
     ).toMatchObject({ preview: 'clear', contentState: 'clear' });
+    expect(
+      applyActivityMaintenance(activity, {
+        kind: 'record_decryption_failure',
+        reasonCode: 'MEGOLM_UNKNOWN_INBOUND_SESSION_ID',
+      }),
+    ).toMatchObject({
+      contentState: 'unavailable',
+      decryptionFailureCode: 'MEGOLM_UNKNOWN_INBOUND_SESSION_ID',
+    });
   });
 
   it('uses stable ID tie-breaking and only emits matrix: event URIs', () => {

@@ -9,10 +9,18 @@
 - `npm run test:matrix:local`: fresh pinned Synapse, three synthetic users, browser monitoring
   boundary assertions, cleanup, and teardown.
 - `npm run test:matrix:remote`: explicitly records a skip when optional credentials are absent.
+- `npm run test:webhook:local`: pinned self-hosted ntfy contract and redacted manifest.
 - `npm run check:gate1`: the complete Phase 1 gate, including audits and reports.
 - `npm run check:gate2`: the complete Phase 2 gate and evidence report.
 - `npm run check:gate3`: the complete Phase 3 workflow gate, including native IndexedDB,
   deterministic queue visuals, and the expanded real-Matrix workflow.
+- `npm run check:gate4`: the Phase 4 reliability gate, including E2EE, recovery/SAS, complete event
+  semantics, local receiver contracts, self-hosted ntfy, alert faults, and Phase 4 visuals.
+
+Steps in the Gate 4 chain that leave no artifact of their own record a marker under
+`artifacts/reports/steps/` as they pass, and the chain clears those markers before it starts. The
+Gate 4 report reads them rather than asserting that a step it never observed succeeded, so it
+cannot be generated from a partial run.
 
 Run `npm run setup:browsers` once after installation to place the pinned Chromium and Firefox
 binaries in the ignored project cache.
@@ -26,8 +34,22 @@ The required controller creates a fresh `.matrix-test-state/synapse` directory, 
 Synapse configuration inside the pinned container, registers three random-password users, creates
 a unique private room, and drives AckWatch through its real UI. It proves pre-arm exclusion,
 post-arm intake, view/acknowledge, edit/redaction, thread merge, complete/reopen, self and
-stopped-window exclusion, rearm, durable reload restoration, and second-tab blocking.
+stopped-window exclusion, rearm, durable reload restoration, second-tab blocking, actual encrypted
+wire text/thread traffic, on-demand decrypted detail, persistent crypto reload,
+cross-signing/secret-storage/key-backup setup, new-device recovery, own-device emoji SAS, and
+visible unknown-token interruption.
 All waits poll observable HTTP, UI, or event-ID conditions with deadlines.
+
+The disposable homeserver runs with rate limiting disabled. The scenario signs the monitor in
+several times over — this controller's own session, the browser, and again as a fresh device after
+the deliberate account-wide logout — which a default Synapse answers with `429`. Rate limiting is
+homeserver behaviour this suite does not qualify.
+
+Every browser console error and page error is recorded verbatim in the run manifest, with the
+failing URL and the scenario phase that was running. The Gate 4 report, not the controller, decides
+which of them are known rig noise; anything outside that documented list fails the gate. Judging
+them in the report keeps the list reviewable and re-runnable against a stored manifest instead of
+costing another homeserver run.
 
 The controller leaves and forgets the synthetic room for every user, stops the container, removes
 volumes, and deletes local server state even after failure. Passwords remain in process memory and
@@ -44,6 +66,15 @@ Candidate PNGs appear in `artifacts/screenshots/`, and the review page appears i
 `artifacts/gallery/index.html`. The gallery manifest records the fixture source and environment.
 Generated images are evidence, not automatically accepted baselines; a human approves intentional
 visual changes at a checkpoint.
+
+## Webhook integration controller
+
+The loopback HTTP contract test captures real request headers and bodies and covers stable
+idempotency, bearer placement, privacy exclusions, rate limiting, response-body redaction, and
+timeouts. `test:webhook:local` starts the digest-pinned ntfy container on loopback, publishes through
+the product adapter, independently polls the topic, records only version/assertion metadata, and
+always removes its container and volumes. The ordinary unit command explicitly skips this one test
+when `ACKWATCH_NTFY_URL` is absent.
 
 ## Credentials
 

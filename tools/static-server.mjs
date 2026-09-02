@@ -15,6 +15,7 @@ const contentTypes = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.png': 'image/png',
+  '.wasm': 'application/wasm',
   '.woff2': 'font/woff2',
 };
 

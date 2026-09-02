@@ -1,0 +1,13 @@
+name: ackwatch-webhook-test
+
+services:
+  ntfy:
+    image: binwiederhier/ntfy:v2.28.0@sha256:6ef4b819f722fccdc036af611c4774cfdc2de821ab74fdd48bbf4c9d6f8973da
+    command: serve
+    environment:
+      NTFY_BASE_URL: http://127.0.0.1:18080
+      NTFY_CACHE_FILE: /var/cache/ntfy/cache.db
+    ports:
+      - '127.0.0.1:18080:80'
+    tmpfs:
+      - /var/cache/ntfy

@@ -4,6 +4,7 @@ import type { AckWatchControllerPort, AppSnapshot } from '../application/app-con
 import type { FoundationViewModel } from './view-model';
 import { signedOutView } from './view-model';
 import { matrixEventUri, type QueueActivity, type QueueItem } from '../domain/queue';
+import type { EventDetail } from '../application/event-detail';
 
 interface AppProps {
   readonly controller?: AckWatchControllerPort;
@@ -36,6 +37,14 @@ function snapshotFromView(view: FoundationViewModel): AppSnapshot {
     queueItems: [],
     queueActivities: [],
     storage: { available: true, persistenceSupported: false },
+    alerts: { audio: 'disabled', notifications: 'disabled', webhook: 'disabled' },
+    crypto: {
+      state: 'off',
+      crossSigningReady: false,
+      secretStorageReady: false,
+      keyBackupReady: false,
+      verification: 'idle',
+    },
   };
 }
 
@@ -80,6 +89,407 @@ function coverageTone(connection: AppSnapshot['coverage']['connection']): string
   if (['reconnecting', 'catching_up', 'recovering_gap'].includes(connection)) return 'warning';
   if (connection === 'coverage_incomplete' || connection === 'fatal_error') return 'danger';
   return 'neutral';
+}
+
+function alertTone(state: AppSnapshot['alerts']['audio']): string {
+  if (state === 'ready') return 'healthy';
+  if (state === 'retrying' || state === 'permission_required') return 'warning';
+  if (state === 'fault') return 'danger';
+  return 'neutral';
+}
+
+const alertLabels: Record<AppSnapshot['alerts']['audio'], string> = {
+  disabled: 'Disabled',
+  ready: 'Ready',
+  permission_required: 'Needs setup',
+  retrying: 'Retrying',
+  fault: 'Fault',
+};
+
+function AlertSettingsPanel({
+  snapshot,
+  controller,
+}: {
+  readonly snapshot: AppSnapshot;
+  readonly controller: AckWatchControllerPort | undefined;
+}) {
+  const settings = snapshot.settings;
+  const [endpoint, setEndpoint] = useState(settings?.webhookEndpoint ?? '');
+  const [topic, setTopic] = useState(settings?.webhookTopic ?? '');
+  const [token, setToken] = useState('');
+  const [status, setStatus] = useState('');
+  const destinationOrigin = useMemo(() => {
+    try {
+      return endpoint ? new URL(endpoint).origin : 'Not configured';
+    } catch {
+      return 'Invalid destination';
+    }
+  }, [endpoint]);
+  if (!settings) return null;
+
+  return (
+    <section className="alert-settings" aria-labelledby="alert-settings-heading">
+      <div>
+        <p className="eyebrow">Alert delivery</p>
+        <h2 id="alert-settings-heading">Local and webhook alerts</h2>
+        <p>
+          Alerts are best effort while this page is open. Durable intent survives reload; Matrix
+          monitoring does not continue after the page closes.
+        </p>
+      </div>
+      <div className="alert-settings__controls">
+        <label>
+          <input
+            type="checkbox"
+            checked={settings.audioEnabled}
+            onChange={(event) =>
+              void controller?.updateSettings({ audioEnabled: event.target.checked })
+            }
+          />
+          Play bundled alert tone
+        </label>
+        <label>
+          Audio volume {Math.round(settings.audioVolume * 100)}%
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.1"
+            value={settings.audioVolume}
+            onChange={(event) =>
+              void controller?.updateSettings({ audioVolume: Number(event.target.value) })
+            }
+          />
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={settings.browserNotificationsEnabled}
+            onChange={(event) => {
+              const enabled = event.target.checked;
+              void controller?.updateSettings({ browserNotificationsEnabled: enabled }).then(() => {
+                if (enabled) void controller.requestNotificationPermission();
+              });
+            }}
+          />
+          Browser notifications while open
+        </label>
+        <details>
+          <summary>Webhook relay</summary>
+          <label htmlFor="webhook-preset">Preset</label>
+          <select
+            id="webhook-preset"
+            value={settings.webhookPreset}
+            onChange={(event) =>
+              void controller?.updateSettings({
+                webhookPreset: event.target.value === 'ntfy' ? 'ntfy' : 'generic',
+              })
+            }
+          >
+            <option value="generic">Generic JSON</option>
+            <option value="ntfy">ntfy-compatible</option>
+          </select>
+          <label htmlFor="webhook-endpoint">
+            {settings.webhookPreset === 'ntfy' ? 'Server URL' : 'HTTPS endpoint'}
+          </label>
+          <input
+            id="webhook-endpoint"
+            type="url"
+            value={endpoint}
+            placeholder="https://alerts.example.test"
+            onChange={(event) => setEndpoint(event.target.value)}
+          />
+          {settings.webhookPreset === 'ntfy' ? (
+            <>
+              <label htmlFor="webhook-topic">Topic</label>
+              <input
+                id="webhook-topic"
+                value={topic}
+                autoComplete="off"
+                onChange={(event) => setTopic(event.target.value)}
+              />
+            </>
+          ) : null}
+          <label htmlFor="webhook-token">Optional bearer token (session only)</label>
+          <input
+            id="webhook-token"
+            type="password"
+            value={token}
+            autoComplete="off"
+            onChange={(event) => setToken(event.target.value)}
+          />
+          <div className="webhook-preview">
+            <strong>Destination origin</strong> {destinationOrigin}
+            <strong>Privacy tier</strong> Generic metadata only—no room, sender, preview,
+            attachment, URI, body, token, or raw event.
+          </div>
+          <div className="detail-actions">
+            <button
+              type="button"
+              onClick={() => {
+                controller?.setWebhookToken(token);
+                setToken('');
+                void controller
+                  ?.updateSettings({
+                    webhookEnabled: true,
+                    webhookEndpoint: endpoint,
+                    webhookTopic: topic,
+                  })
+                  .then(
+                    () => setStatus('Webhook configuration saved. Send a test to verify access.'),
+                    () => setStatus('Webhook configuration failed validation.'),
+                  );
+              }}
+            >
+              Save and enable
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              disabled={!settings.webhookEnabled}
+              onClick={() =>
+                void controller?.sendTestWebhook().then(
+                  () => setStatus('Test notification delivered.'),
+                  () => setStatus('Test failed; review webhook health and browser CORS access.'),
+                )
+              }
+            >
+              Send test notification
+            </button>
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() =>
+                void controller?.updateSettings({ webhookEnabled: false }).then(() => {
+                  controller.setWebhookToken('');
+                  setStatus('Webhook disabled and session token cleared.');
+                })
+              }
+            >
+              Disable webhook
+            </button>
+          </div>
+          <p aria-live="polite">{status}</p>
+        </details>
+        {(snapshot.alertDeliveries ?? [])
+          .filter(({ status: deliveryStatus }) => deliveryStatus === 'exhausted')
+          .map((delivery) => (
+            <div className="alert-retry" key={delivery.id}>
+              <span>
+                {delivery.transport} exhausted: {delivery.lastErrorCode ?? 'unknown failure'}
+              </span>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => void controller?.retryAlertDelivery(delivery.id)}
+              >
+                Retry delivery
+              </button>
+            </div>
+          ))}
+      </div>
+    </section>
+  );
+}
+
+function CryptoSecurityPanel({
+  snapshot,
+  controller,
+}: {
+  readonly snapshot: AppSnapshot;
+  readonly controller: AckWatchControllerPort | undefined;
+}) {
+  const [password, setPassword] = useState('');
+  const [passphrase, setPassphrase] = useState('');
+  const [recoveryInput, setRecoveryInput] = useState('');
+  const [generatedRecoveryKey, setGeneratedRecoveryKey] = useState('');
+  const [status, setStatus] = useState('');
+
+  return (
+    <section className="crypto-settings" aria-labelledby="crypto-settings-heading">
+      <div>
+        <p className="eyebrow">Encrypted Matrix</p>
+        <h2 id="crypto-settings-heading">Durable device security</h2>
+        <p>
+          Rust crypto uses an account-and-device-specific IndexedDB store. Recovery secrets stay in
+          memory for this session and are never placed in workflow exports.
+        </p>
+      </div>
+      <dl className="crypto-status">
+        <div>
+          <dt>Crypto engine</dt>
+          <dd>{snapshot.crypto.state}</dd>
+        </div>
+        <div>
+          <dt>Cross-signing</dt>
+          <dd>{snapshot.crypto.crossSigningReady ? 'Ready' : 'Setup needed'}</dd>
+        </div>
+        <div>
+          <dt>Secret storage</dt>
+          <dd>{snapshot.crypto.secretStorageReady ? 'Ready' : 'Setup needed'}</dd>
+        </div>
+        <div>
+          <dt>Key backup</dt>
+          <dd>{snapshot.crypto.keyBackupReady ? 'Enabled' : 'Setup needed'}</dd>
+        </div>
+        <div>
+          <dt>Device verification</dt>
+          <dd>{snapshot.crypto.verification}</dd>
+        </div>
+      </dl>
+      <div className="crypto-actions">
+        <details>
+          <summary>Set up cross-signing, secret storage, and key backup</summary>
+          <label htmlFor="crypto-password">
+            Current Matrix password for one-time authorization
+          </label>
+          <input
+            id="crypto-password"
+            type="password"
+            value={password}
+            autoComplete="current-password"
+            onChange={(event) => setPassword(event.target.value)}
+          />
+          <label htmlFor="crypto-passphrase">Optional recovery-key passphrase</label>
+          <input
+            id="crypto-passphrase"
+            type="password"
+            value={passphrase}
+            autoComplete="new-password"
+            onChange={(event) => setPassphrase(event.target.value)}
+          />
+          <button
+            type="button"
+            disabled={!password}
+            onClick={() => {
+              const submittedPassword = password;
+              const submittedPassphrase = passphrase || undefined;
+              setPassword('');
+              setPassphrase('');
+              void controller?.bootstrapCryptoSecurity(submittedPassword, submittedPassphrase).then(
+                (key) => {
+                  setGeneratedRecoveryKey(key);
+                  setStatus('Security setup completed. Save the recovery key now.');
+                },
+                () => setStatus('Security setup failed without retaining the supplied secrets.'),
+              );
+            }}
+          >
+            Create recovery and backup
+          </button>
+          {generatedRecoveryKey ? (
+            <output className="recovery-key">
+              <strong>Recovery key—store this outside AckWatch</strong>
+              <code>{generatedRecoveryKey}</code>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => setGeneratedRecoveryKey('')}
+              >
+                I saved it; clear from screen
+              </button>
+            </output>
+          ) : null}
+        </details>
+        <details>
+          <summary>Restore from a recovery key</summary>
+          <label htmlFor="crypto-recovery">Recovery key</label>
+          <input
+            id="crypto-recovery"
+            type="password"
+            value={recoveryInput}
+            autoComplete="off"
+            onChange={(event) => setRecoveryInput(event.target.value)}
+          />
+          <button
+            type="button"
+            disabled={!recoveryInput}
+            onClick={() => {
+              const submitted = recoveryInput;
+              setRecoveryInput('');
+              void controller?.restoreCryptoSecurity(submitted).then(
+                () => setStatus('Recovery key accepted; crypto status refreshed.'),
+                () => setStatus('Recovery failed; the key was cleared from this form.'),
+              );
+            }}
+          >
+            Restore security secrets
+          </button>
+        </details>
+        <div className="detail-actions">
+          {snapshot.crypto.verification === 'requested' && snapshot.crypto.verificationIncoming ? (
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => void controller?.acceptVerificationRequest()}
+            >
+              Accept verification request
+            </button>
+          ) : null}
+          {snapshot.crypto.verification === 'ready' ? (
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => void controller?.startSasVerification()}
+            >
+              Start emoji verification
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() =>
+              void controller?.requestOwnDeviceVerification().then(
+                () => setStatus('Verification requested from another device.'),
+                () => setStatus('A verification request could not be created.'),
+              )
+            }
+          >
+            Verify this device
+          </button>
+          {['requested', 'ready', 'started'].includes(snapshot.crypto.verification) ? (
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => void controller?.cancelOwnDeviceVerification()}
+            >
+              Cancel verification
+            </button>
+          ) : null}
+        </div>
+        {snapshot.crypto.verificationSas ? (
+          <div className="verification-sas" role="group" aria-label="Device verification code">
+            <strong>Compare on both devices</strong>
+            {snapshot.crypto.verificationSas.emoji ? (
+              <ol>
+                {snapshot.crypto.verificationSas.emoji.map(({ symbol, name }) => (
+                  <li key={`${symbol}-${name}`}>
+                    <span aria-hidden="true">{symbol}</span> {name}
+                  </li>
+                ))}
+              </ol>
+            ) : null}
+            {snapshot.crypto.verificationSas.decimal ? (
+              <p>{snapshot.crypto.verificationSas.decimal.join(' · ')}</p>
+            ) : null}
+            <div className="detail-actions">
+              <button type="button" onClick={() => void controller?.confirmSasVerification(true)}>
+                They match
+              </button>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => void controller?.confirmSasVerification(false)}
+              >
+                They do not match
+              </button>
+            </div>
+          </div>
+        ) : null}
+        <p aria-live="polite">{status || snapshot.crypto.detail}</p>
+      </div>
+    </section>
+  );
 }
 
 function LoginPanel({
@@ -327,6 +737,19 @@ function ItemDetail({
   const itemActivities = activities.filter(({ itemId }) => itemId === item.id);
   const uri = latest ? matrixEventUri(latest.roomId, latest.eventId) : undefined;
   const [copyStatus, setCopyStatus] = useState('');
+  const [resolvedDetail, setResolvedDetail] = useState<EventDetail>();
+
+  useEffect(() => {
+    let active = true;
+    if (latest && controller) {
+      void controller.resolveEventDetail(latest.roomId, latest.eventId).then((detail) => {
+        if (active) setResolvedDetail(detail);
+      });
+    }
+    return () => {
+      active = false;
+    };
+  }, [controller, latest]);
 
   useEffect(() => {
     closeButton.current?.focus();
@@ -363,7 +786,11 @@ function ItemDetail({
         <div className="detail-panel__header">
           <div>
             <p className="eyebrow">Queue item</p>
-            <h2 id="detail-title">{latest?.roomName ?? item.roomId}</h2>
+            <h2 id="detail-title">
+              {resolvedDetail?.availability === 'available'
+                ? resolvedDetail.roomName
+                : (latest?.roomName ?? item.roomId)}
+            </h2>
           </div>
           <button ref={closeButton} type="button" className="button-secondary" onClick={close}>
             Close details
@@ -372,7 +799,11 @@ function ItemDetail({
         <dl className="detail-facts">
           <div>
             <dt>Sender</dt>
-            <dd>{latest?.sender ?? 'Unavailable'}</dd>
+            <dd>
+              {resolvedDetail?.availability === 'available'
+                ? resolvedDetail.sender
+                : (latest?.sender ?? 'Unavailable')}
+            </dd>
           </div>
           <div>
             <dt>Status</dt>
@@ -380,23 +811,67 @@ function ItemDetail({
           </div>
           <div>
             <dt>Detected</dt>
-            <dd>{new Date(latest?.detectedAt ?? item.firstDetectedAt).toLocaleString()}</dd>
+            <dd>
+              {new Date(
+                resolvedDetail?.availability === 'available'
+                  ? resolvedDetail.originServerTs
+                  : (latest?.detectedAt ?? item.firstDetectedAt),
+              ).toLocaleString()}
+            </dd>
           </div>
           <div>
             <dt>Context</dt>
-            <dd>{latest?.relationKind ?? 'independent'}</dd>
+            <dd>
+              {resolvedDetail?.availability === 'available'
+                ? resolvedDetail.relationKind
+                : (latest?.relationKind ?? 'independent')}
+            </dd>
           </div>
         </dl>
         <div className="detail-message">
           <p>
-            {latest?.preview ?? 'Full detail is temporarily unavailable from the Matrix client.'}
+            {resolvedDetail?.availability === 'available'
+              ? resolvedDetail.body
+              : (latest?.preview ??
+                'Full detail is temporarily unavailable from the Matrix client.')}
           </p>
           {latest ? (
             <small>
-              {latest.messageType}
+              {resolvedDetail?.availability === 'available'
+                ? resolvedDetail.messageType
+                : latest.messageType}
               {latest.edited ? ' · edited' : ''}
               {latest.redacted ? ' · redacted' : ''}
+              {latest.contentState !== 'clear' ? ` · ${latest.contentState.replace('_', ' ')}` : ''}
             </small>
+          ) : null}
+          {resolvedDetail?.availability === 'unavailable' ? (
+            <small role="status">
+              {resolvedDetail.detail}
+              {resolvedDetail.decryptionFailureCode
+                ? ` (${resolvedDetail.decryptionFailureCode})`
+                : ''}
+            </small>
+          ) : null}
+          {resolvedDetail?.availability === 'available' && resolvedDetail.media ? (
+            <dl className="detail-media">
+              <div>
+                <dt>Attachment</dt>
+                <dd>{resolvedDetail.media.name}</dd>
+              </div>
+              {resolvedDetail.media.mimeType ? (
+                <div>
+                  <dt>Type</dt>
+                  <dd>{resolvedDetail.media.mimeType}</dd>
+                </div>
+              ) : null}
+              {resolvedDetail.media.size !== undefined ? (
+                <div>
+                  <dt>Size</dt>
+                  <dd>{resolvedDetail.media.size} bytes</dd>
+                </div>
+              ) : null}
+            </dl>
           ) : null}
         </div>
         {itemActivities.length > 1 ? (
@@ -565,8 +1040,8 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
             <dt>Audio</dt>
             <dd>
               <HealthPill
-                label={snapshot.settings?.audioEnabled ? 'Enabled' : 'Disabled'}
-                tone="neutral"
+                label={alertLabels[snapshot.alerts.audio]}
+                tone={alertTone(snapshot.alerts.audio)}
               />
             </dd>
           </div>
@@ -574,8 +1049,8 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
             <dt>Notifications</dt>
             <dd>
               <HealthPill
-                label={snapshot.settings?.browserNotificationsEnabled ? 'Enabled' : 'Disabled'}
-                tone="neutral"
+                label={alertLabels[snapshot.alerts.notifications]}
+                tone={alertTone(snapshot.alerts.notifications)}
               />
             </dd>
           </div>
@@ -583,8 +1058,8 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
             <dt>Webhook</dt>
             <dd>
               <HealthPill
-                label={snapshot.settings?.webhookEnabled ? 'Configured' : 'Disabled'}
-                tone="neutral"
+                label={alertLabels[snapshot.alerts.webhook]}
+                tone={alertTone(snapshot.alerts.webhook)}
               />
             </dd>
           </div>
@@ -594,12 +1069,24 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
       {snapshot.error ||
       snapshot.coverage.fault ||
       snapshot.storage.fault ||
+      snapshot.alerts.audio === 'fault' ||
+      snapshot.alerts.notifications === 'fault' ||
+      snapshot.alerts.webhook === 'fault' ||
+      snapshot.crypto.state === 'fault' ||
       snapshot.phase === 'blocked' ? (
         <section className="fault-banner" role="alert">
           <strong>
             {snapshot.phase === 'blocked' ? 'Account already open' : 'Coverage needs attention'}
           </strong>
-          <span>{snapshot.error ?? snapshot.coverage.fault ?? snapshot.storage.fault}</span>
+          <span>
+            {snapshot.error ??
+              snapshot.coverage.fault ??
+              snapshot.storage.fault ??
+              snapshot.alerts.audioDetail ??
+              snapshot.alerts.notificationDetail ??
+              snapshot.alerts.webhookDetail ??
+              snapshot.crypto.detail}
+          </span>
           {snapshot.coverage.connection === 'coverage_incomplete' ? (
             <button type="button" onClick={() => void controller?.retryCoverage()}>
               Retry recovery
@@ -750,6 +1237,10 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
           </div>
         </section>
 
+        {isSignedIn ? <CryptoSecurityPanel snapshot={snapshot} controller={controller} /> : null}
+
+        {isSignedIn ? <AlertSettingsPanel snapshot={snapshot} controller={controller} /> : null}
+
         {isSignedIn ? (
           <section className="storage-card" aria-labelledby="storage-heading">
             <div>
@@ -817,6 +1308,7 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
 
       {selectedItem ? (
         <ItemDetail
+          key={selectedItem.id}
           item={selectedItem}
           activities={snapshot.queueActivities}
           controller={controller}

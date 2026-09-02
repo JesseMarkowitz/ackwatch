@@ -56,6 +56,8 @@ export interface QueueActivity {
   readonly localSequence: number;
   readonly provenance: string;
   readonly contentState: 'clear' | 'encrypted_placeholder' | 'unavailable';
+  readonly decryptionFailureCode?: string | undefined;
+  readonly media?: SafeMediaMetadata | undefined;
   readonly edited: boolean;
   readonly redacted: boolean;
   readonly relationKind: 'independent' | 'thread' | 'reply';
@@ -63,10 +65,24 @@ export interface QueueActivity {
   readonly roomName?: string | undefined;
 }
 
+export interface SafeMediaMetadata {
+  readonly name: string;
+  readonly mimeType?: string | undefined;
+  readonly size?: number | undefined;
+  readonly width?: number | undefined;
+  readonly height?: number | undefined;
+}
+
 export type ActivityMaintenanceCommand =
-  | { readonly kind: 'apply_edit'; readonly preview: string }
+  | { readonly kind: 'apply_edit'; readonly preview?: string }
   | { readonly kind: 'apply_redaction' }
-  | { readonly kind: 'enrich_decrypted_content'; readonly preview: string };
+  | {
+      readonly kind: 'enrich_decrypted_content';
+      readonly preview: string;
+      readonly messageType?: string;
+      readonly media?: SafeMediaMetadata;
+    }
+  | { readonly kind: 'record_decryption_failure'; readonly reasonCode: string };
 
 export interface WorkflowTransition {
   readonly id: string;
@@ -89,7 +105,7 @@ export interface AlertEffect {
   readonly kind: 'initial' | 'reopen' | 'unacknowledged' | 'acknowledged';
   readonly stage: number;
   readonly dueAt: number;
-  readonly status: 'pending' | 'cancelled';
+  readonly status: 'pending' | 'delivered' | 'cancelled';
 }
 
 export type QueueCommand =
@@ -441,14 +457,27 @@ export function applyActivityMaintenance(
 ): QueueActivity {
   switch (command.kind) {
     case 'apply_edit':
-      return { ...activity, preview: command.preview, edited: true };
+      return {
+        ...activity,
+        ...(command.preview === undefined ? {} : { preview: command.preview }),
+        edited: true,
+      };
     case 'apply_redaction':
       return { ...activity, preview: 'Message removed', redacted: true };
     case 'enrich_decrypted_content':
       return {
         ...activity,
         preview: command.preview,
+        ...(command.messageType === undefined ? {} : { messageType: command.messageType }),
+        ...(command.media === undefined ? {} : { media: command.media }),
         contentState: 'clear',
+        decryptionFailureCode: undefined,
+      };
+    case 'record_decryption_failure':
+      return {
+        ...activity,
+        contentState: 'unavailable',
+        decryptionFailureCode: command.reasonCode,
       };
   }
 }

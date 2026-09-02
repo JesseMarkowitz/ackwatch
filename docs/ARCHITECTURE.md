@@ -41,3 +41,16 @@ bodies. Zod validates records at the repository boundary. Invalid queue records 
 quarantine entries and storage health remains visibly degraded until the user resolves the data
 problem. Monitoring session records are durable for diagnostics, but monitoring intent itself is
 deliberately never restored.
+
+Phase 4 initializes the Matrix SDK Rust/WASM crypto engine before sync. SDK sync and crypto stores
+have stable account-and-device namespaces and are protected by the same exclusive account lock.
+Encrypted wire events enter the workflow immediately as bounded placeholders; SDK decryption
+callbacks apply idempotent success/failure maintenance. Complete bodies and relation/media detail
+are resolved from the live SDK timeline on demand and never copied into workflow storage.
+
+Alert effects form a transactional outbox. A single absolute-deadline scheduler evaluates on its
+interval and on startup/focus/visibility/pageshow. The dispatcher creates one durable delivery per
+enabled transport, claims it with a crash lease, records every attempt, and settles it as delivered,
+pending with capped backoff, or exhausted. Audio and notifications are browser adapters; webhook
+credentials have a separate session-only boundary. Transport state cannot mutate queue state or
+overstate Matrix coverage.

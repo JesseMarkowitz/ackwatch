@@ -25,6 +25,7 @@
     "test:visual": "npm run build:catalog && env -u FORCE_COLOR PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright test --config=playwright.visual.config.ts --project=visual && node tools/generate-gallery.mjs",
     "test:matrix:local": "npm run build && env -u FORCE_COLOR PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright node tests/matrix/local-controller.mjs",
     "test:matrix:remote": "npm run build && node --env-file-if-exists=.env.test.local tests/matrix/remote-controller.mjs",
+    "test:webhook:local": "node tests/webhook/local-controller.mjs",
     "setup:browsers": "env -u FORCE_COLOR PLAYWRIGHT_BROWSERS_PATH=.cache/ms-playwright playwright install chromium firefox",
     "check:fast": "npm run format:check && npm run lint && npm run typecheck && npm run test:unit",
     "audit:secrets": "secretlint '**/*' --secretlintignore .gitignore",
@@ -34,9 +35,11 @@
     "report:gate1": "node tools/generate-gate1-report.mjs",
     "report:gate2": "node tools/generate-gate2-report.mjs",
     "report:gate3": "node tools/generate-gate3-report.mjs",
+    "report:gate4": "node tools/generate-gate4-report.mjs",
     "check:gate1": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate1",
     "check:gate2": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run test:matrix:local && npm run test:matrix:remote && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate2",
-    "check:gate3": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run test:matrix:local && npm run test:matrix:remote && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate3"
+    "check:gate3": "npm run check:fast && npm run build && npm run test:browser && npm run test:visual && npm run test:matrix:local && npm run test:matrix:remote && npm run audit:secrets && npm run audit:tracked && npm run audit:dependencies && npm run report:licenses && npm run report:gate3",
+    "check:gate4": "node tools/record-step.mjs --reset && npm run check:fast && node tools/record-step.mjs fastChecks && npm run build && node tools/record-step.mjs productionBuild && npm run test:browser && npm run test:visual && npm run test:matrix:local && npm run test:matrix:remote && npm run test:webhook:local && npm run audit:secrets && node tools/record-step.mjs secretScan && npm run audit:tracked && node tools/record-step.mjs trackedFileAudit && npm run audit:dependencies && node tools/record-step.mjs dependencyAudit && npm run report:licenses && npm run report:gate4"
   },
   "dependencies": {
     "@fontsource-variable/jetbrains-mono": "5.3.0",

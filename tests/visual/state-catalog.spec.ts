@@ -12,6 +12,27 @@ const scenarios = [
   { name: 'incomplete-desktop', state: 'incomplete', viewport: { width: 1440, height: 1000 } },
   { name: 'second-tab-desktop', state: 'second-tab', viewport: { width: 1440, height: 1000 } },
   { name: 'workflow-desktop', state: 'workflow', viewport: { width: 1440, height: 1200 } },
+  { name: 'overdue-desktop', state: 'overdue', viewport: { width: 1440, height: 1200 } },
+  {
+    name: 'encrypted-placeholder-desktop',
+    state: 'encrypted-placeholder',
+    viewport: { width: 1440, height: 1200 },
+  },
+  {
+    name: 'alerts-ready-desktop',
+    state: 'alerts-ready',
+    viewport: { width: 1440, height: 1300 },
+  },
+  {
+    name: 'alert-faults-desktop',
+    state: 'alert-faults',
+    viewport: { width: 1440, height: 1300 },
+  },
+  {
+    name: 'crypto-fault-desktop',
+    state: 'crypto-fault',
+    viewport: { width: 1440, height: 1200 },
+  },
   {
     name: 'workflow-detail-desktop',
     state: 'workflow',
