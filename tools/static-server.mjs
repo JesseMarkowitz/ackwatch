@@ -9,6 +9,7 @@ if (!rootArgument || !portArgument) {
 }
 
 const root = resolve(rootArgument);
+const contentSecurityPolicy = process.env.ACKWATCH_CSP ?? '';
 const port = Number.parseInt(portArgument, 10);
 const contentTypes = {
   '.css': 'text/css; charset=utf-8',
@@ -47,6 +48,8 @@ const server = createServer((request, response) => {
   response.writeHead(200, {
     'Cache-Control': 'no-store',
     'Content-Type': contentTypes[extname(filePath)] ?? 'application/octet-stream',
+    // Set so the qualification suite can exercise the shipped policy rather than describing one.
+    ...(contentSecurityPolicy ? { 'Content-Security-Policy': contentSecurityPolicy } : {}),
   });
   createReadStream(filePath).pipe(response);
 });

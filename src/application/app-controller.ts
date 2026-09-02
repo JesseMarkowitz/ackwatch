@@ -61,7 +61,8 @@ export interface AppSnapshot {
   readonly storage: BrowserStorageSnapshot;
   readonly settings?: AccountSettingsRecord;
   readonly alerts: AlertChannelsSnapshot;
-  readonly alertDeliveries?: WorkflowProjection['deliveries'];
+  /** Deliveries that have exhausted their retries and need a manual decision. */
+  readonly alertDeliveries?: UiProjection['exhaustedDeliveries'];
   readonly crypto: CryptoSnapshot;
   readonly session: WorkSessionSnapshot;
   readonly error?: string;
@@ -220,7 +221,7 @@ export class AckWatchController implements AckWatchControllerPort {
   private error: string | undefined;
   private workflowProjection: UiProjection = {
     items: [],
-    deliveries: [],
+    exhaustedDeliveries: [],
     quarantineCount: 0,
   };
   private storageSnapshot: BrowserStorageSnapshot = {
@@ -493,7 +494,7 @@ export class AckWatchController implements AckWatchControllerPort {
       this.credentials = undefined;
       this.preparedLogin = undefined;
       this.error = undefined;
-      this.workflowProjection = { items: [], deliveries: [], quarantineCount: 0 };
+      this.workflowProjection = { items: [], exhaustedDeliveries: [], quarantineCount: 0 };
       this.accountSettings = undefined;
       this.cryptoSnapshot = initialCryptoSnapshot;
       this.phase = 'signed_out';
@@ -817,7 +818,7 @@ export class AckWatchController implements AckWatchControllerPort {
         notifications: 'disabled',
         webhook: 'disabled',
       },
-      alertDeliveries: this.workflowProjection.deliveries,
+      alertDeliveries: this.workflowProjection.exhaustedDeliveries,
       crypto: this.cryptoSnapshot,
       session: {
         state: this.sessionState,

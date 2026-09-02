@@ -20,6 +20,23 @@ export default defineConfig({
     { name: 'firefox', use: { browserName: 'firefox' } },
   ],
   webServer: {
+    // The production build is served under the policy published in docs/DEPLOYMENT.md, so the
+    // browser suite qualifies that policy rather than merely describing it.
+    env: {
+      ACKWATCH_CSP: [
+        "default-src 'none'",
+        "script-src 'self' 'wasm-unsafe-eval'",
+        "style-src 'self'",
+        "font-src 'self' data:",
+        "img-src 'self' data:",
+        'media-src data:',
+        "connect-src 'self' https://homeserver.example",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+        "object-src 'none'",
+      ].join('; '),
+    },
     command: 'npm run build && node tools/static-server.mjs dist 4173',
     port: 4173,
     reuseExistingServer: false,

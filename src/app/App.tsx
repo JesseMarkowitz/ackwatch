@@ -271,22 +271,20 @@ function AlertSettingsPanel({
           </div>
           <p aria-live="polite">{status}</p>
         </details>
-        {(snapshot.alertDeliveries ?? [])
-          .filter(({ status: deliveryStatus }) => deliveryStatus === 'exhausted')
-          .map((delivery) => (
-            <div className="alert-retry" key={delivery.id}>
-              <span>
-                {delivery.transport} exhausted: {delivery.lastErrorCode ?? 'unknown failure'}
-              </span>
-              <button
-                type="button"
-                className="button-secondary"
-                onClick={() => void controller?.retryAlertDelivery(delivery.id)}
-              >
-                Retry delivery
-              </button>
-            </div>
-          ))}
+        {(snapshot.alertDeliveries ?? []).map((delivery) => (
+          <div className="alert-retry" key={delivery.id}>
+            <span>
+              {delivery.transport} exhausted: {delivery.lastErrorCode ?? 'unknown failure'}
+            </span>
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={() => void controller?.retryAlertDelivery(delivery.id)}
+            >
+              Retry delivery
+            </button>
+          </div>
+        ))}
       </div>
     </section>
   );

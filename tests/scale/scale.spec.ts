@@ -111,7 +111,9 @@ test('measures workflow behaviour as the store grows', async ({ page }) => {
   if (progress.report) {
     const report = progress.report;
     process.stdout.write(
-      `  startup ${report.startupMs.toFixed(1)}ms  render ${report.renderMs.toFixed(1)}ms  ` +
+      `  scheduler samples: ${report.schedulerSamples.map((v) => v.toFixed(0)).join(', ')}ms\n` +
+        `  command samples: ${report.commandSamples.map((v) => v.toFixed(0)).join(', ')}ms\n` +
+        `  startup ${report.startupMs.toFixed(1)}ms  render ${report.renderMs.toFixed(1)}ms  ` +
         `command ${report.commandMs.toFixed(1)}ms  scheduler ${report.schedulerMs.toFixed(1)}ms  ` +
         `migration ${report.migrationMs.toFixed(1)}ms\n`,
     );

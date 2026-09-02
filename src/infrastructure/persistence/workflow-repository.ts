@@ -237,7 +237,8 @@ export type PersistenceFaultPoint =
 
 export interface UiProjection {
   readonly items: readonly QueueItem[];
-  readonly deliveries: readonly AlertDeliveryRecord[];
+  /** Only deliveries that have given up: the sole delivery state the queue view renders. */
+  readonly exhaustedDeliveries: readonly AlertDeliveryRecord[];
   readonly quarantineCount: number;
 }
 
@@ -1101,7 +1102,10 @@ export class WorkflowRepository {
   public async uiProjection(accountId: string): Promise<UiProjection> {
     const [rawItems, rawDeliveries, quarantineCount] = await Promise.all([
       this.database.queueItems.where('accountId').equals(accountId).toArray(),
-      this.database.alertDeliveries.where('accountId').equals(accountId).toArray(),
+      this.database.alertDeliveries
+        .where('[accountId+status]')
+        .equals([accountId, 'exhausted'])
+        .toArray(),
       this.database.quarantine.where('accountId').equals(accountId).count(),
     ]);
     const items: QueueItem[] = [];
@@ -1112,7 +1116,7 @@ export class WorkflowRepository {
     }
     return {
       items: items.sort(compareQueueItems),
-      deliveries: rawDeliveries.map((value) => deliverySchema.parse(value)),
+      exhaustedDeliveries: rawDeliveries.map((value) => deliverySchema.parse(value)),
       quarantineCount,
     };
   }

@@ -60,7 +60,8 @@ and ntfy stacks, and it records each step as it passes so the generated report r
 ran. Generated reports, screenshots, traces, and the HTML gallery are written beneath ignored
 `artifacts/`.
 
-See [Testing](./docs/TESTING.md), [Architecture](./docs/ARCHITECTURE.md), and the
+See [Deployment](./docs/DEPLOYMENT.md) for the Content Security Policy and hosting notes, plus
+[Testing](./docs/TESTING.md), [Architecture](./docs/ARCHITECTURE.md), and the
 [ADR index](./docs/adr/README.md) for the decisions behind the implementation.
 
 ## Current boundaries

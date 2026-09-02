@@ -1,3 +1,4 @@
+import './zod-jitless';
 import '@fontsource-variable/manrope';
 import '@fontsource-variable/jetbrains-mono';
 import { StrictMode } from 'react';

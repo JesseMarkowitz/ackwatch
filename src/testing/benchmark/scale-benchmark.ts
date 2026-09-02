@@ -33,7 +33,9 @@ export interface ScaleReport {
   readonly startupMs: number;
   readonly renderMs: number;
   readonly commandMs: number;
+  readonly commandSamples: readonly number[];
   readonly schedulerMs: number;
+  readonly schedulerSamples: readonly number[];
   readonly migrationMs: number;
   readonly finalCounts: Record<string, number>;
   readonly databaseName: string;
@@ -234,18 +236,30 @@ export class ScaleBenchmark {
 
     // A single user action at full size: the domain command plus the projection refresh that the
     // controller performs before the UI can update.
-    const [, commandMs] = await timed(async () => {
-      const target = finalProjection.items[0];
-      if (target)
+    // Repeated rather than sampled once: the first write transaction after bulk seeding can pay a
+    // one-off cost that says nothing about the latency a user actually feels. The refresh is the
+    // UI projection, which is what the controller performs after a command.
+    const commandSamples: number[] = [];
+    for (const target of finalProjection.items.slice(0, 6)) {
+      const [, sample] = await timed(async () => {
         await repository.applyCommand(accountId, target.id, { kind: 'mark_viewed', at: clock });
-      return await repository.projection(accountId);
-    });
+        return await repository.uiProjection(accountId);
+      });
+      commandSamples.push(sample);
+    }
+    const sortedCommands = [...commandSamples].sort((left, right) => left - right);
+    const commandMs = sortedCommands[Math.floor(sortedCommands.length / 2)] ?? 0;
 
-    // One scheduler pass, as AlertDispatcher.run actually performs it. The dispatcher resolves the
-    // effect and item for each delivery by identity, so no full projection belongs in this measure.
-    const [, schedulerMs] = await timed(async () =>
-      repository.prepareDueAlertDeliveries(accountId, clock, ['audio']),
-    );
+    // The first pass materializes the backlog; the passes after it are what actually runs every
+    // fifteen seconds, so both are reported rather than conflated.
+    const schedulerSamples: number[] = [];
+    for (let pass = 0; pass < 3; pass += 1) {
+      const [, sample] = await timed(async () =>
+        repository.prepareDueAlertDeliveries(accountId, clock, ['audio']),
+      );
+      schedulerSamples.push(sample);
+    }
+    const schedulerMs = schedulerSamples.at(-1) ?? 0;
 
     const renderMs = this.measureRender(finalProjection.items, finalProjection.activities);
     const finalCounts = await countAll(repository.unsafeDatabaseForTests());
@@ -261,7 +275,9 @@ export class ScaleBenchmark {
       startupMs,
       renderMs,
       commandMs,
+      commandSamples,
       schedulerMs,
+      schedulerSamples,
       migrationMs,
       finalCounts,
       databaseName,
