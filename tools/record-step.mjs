@@ -12,7 +12,13 @@ if (!name) throw new Error('Provide a step name to record, or --reset.');
 if (name === '--reset') {
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
-  process.stdout.write('Cleared recorded release-chain steps.\n');
+  // The generated summaries are removed with the markers. A gate report left on disk from an
+  // earlier run reads as current to anyone inspecting it after a failed chain, which is how a
+  // stale "pass" gets believed; the file may only exist when this chain reaches its end.
+  for (const stale of ['gate4-summary.json', 'gate4-summary.md']) {
+    rmSync(`artifacts/reports/${stale}`, { force: true });
+  }
+  process.stdout.write('Cleared recorded release-chain steps and stale gate summaries.\n');
 } else {
   mkdirSync(directory, { recursive: true });
   writeFileSync(

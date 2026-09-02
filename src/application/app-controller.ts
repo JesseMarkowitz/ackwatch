@@ -36,6 +36,7 @@ import {
   defaultAccountSettings,
   type AcceptedActivityInput,
   type StorageHealth,
+  type UiProjection,
   type WorkflowProjection,
 } from '../infrastructure/persistence/workflow-repository';
 import {
@@ -57,7 +58,6 @@ export interface AppSnapshot {
   readonly ingestionIssues: readonly IngestionIssue[];
   readonly ingestionDecisions: readonly IngestionDecision[];
   readonly queueItems: readonly QueueItem[];
-  readonly queueActivities: readonly QueueActivity[];
   readonly storage: BrowserStorageSnapshot;
   readonly settings?: AccountSettingsRecord;
   readonly alerts: AlertChannelsSnapshot;
@@ -97,6 +97,7 @@ export interface AckWatchControllerPort {
   sendTestWebhook(): Promise<void>;
   retryAlertDelivery(deliveryId: string): Promise<void>;
   resolveEventDetail(roomId: string, eventId: string): Promise<EventDetail>;
+  loadItemActivities(itemId: string): Promise<readonly QueueActivity[]>;
   bootstrapCryptoSecurity(password: string, recoveryPassphrase?: string): Promise<string>;
   restoreCryptoSecurity(recoveryKey: string): Promise<void>;
   requestOwnDeviceVerification(): Promise<void>;
@@ -166,6 +167,8 @@ export interface WorkflowRepositoryPort extends AlertRepositoryPort {
   endMonitoringSession(sessionId: string, stoppedAt: number, stopReason: string): Promise<void>;
   applyCommand(accountId: string, itemId: string, command: QueueCommand): Promise<void>;
   projection(accountId: string): Promise<WorkflowProjection>;
+  uiProjection(accountId: string): Promise<UiProjection>;
+  itemActivities(accountId: string, itemId: string): Promise<readonly QueueActivity[]>;
   getSettings(accountId: string): Promise<AccountSettingsRecord>;
   putSettings(settings: AccountSettingsRecord): Promise<void>;
   exportSettings(accountId: string): Promise<string>;
@@ -215,11 +218,8 @@ export class AckWatchController implements AckWatchControllerPort {
   private workflow: WorkflowRepositoryPort | undefined;
   private lease: InstanceLease | undefined;
   private error: string | undefined;
-  private workflowProjection: WorkflowProjection = {
+  private workflowProjection: UiProjection = {
     items: [],
-    activities: [],
-    transitions: [],
-    effects: [],
     deliveries: [],
     quarantineCount: 0,
   };
@@ -493,14 +493,7 @@ export class AckWatchController implements AckWatchControllerPort {
       this.credentials = undefined;
       this.preparedLogin = undefined;
       this.error = undefined;
-      this.workflowProjection = {
-        items: [],
-        activities: [],
-        transitions: [],
-        effects: [],
-        deliveries: [],
-        quarantineCount: 0,
-      };
+      this.workflowProjection = { items: [], deliveries: [], quarantineCount: 0 };
       this.accountSettings = undefined;
       this.cryptoSnapshot = initialCryptoSnapshot;
       this.phase = 'signed_out';
@@ -546,7 +539,7 @@ export class AckWatchController implements AckWatchControllerPort {
       });
       this.workflow = workflow;
       await workflow.open();
-      this.workflowProjection = await workflow.projection(credentials.accountId);
+      this.workflowProjection = await workflow.uiProjection(credentials.accountId);
       this.accountSettings = await workflow.getSettings(credentials.accountId);
       startupStage = 'work session resolution';
       await this.resolveWorkSession(workflow, credentials.accountId);
@@ -676,7 +669,7 @@ export class AckWatchController implements AckWatchControllerPort {
   private async refreshWorkflow(): Promise<void> {
     const accountId = this.credentials?.accountId;
     if (accountId && this.workflow) {
-      this.workflowProjection = await this.workflow.projection(accountId);
+      this.workflowProjection = await this.workflow.uiProjection(accountId);
     }
   }
 
@@ -769,6 +762,12 @@ export class AckWatchController implements AckWatchControllerPort {
     return this.archivedSummary;
   }
 
+  public async loadItemActivities(itemId: string): Promise<readonly QueueActivity[]> {
+    const accountId = this.credentials?.accountId;
+    if (!accountId || !this.workflow) return [];
+    return await this.workflow.itemActivities(accountId, itemId);
+  }
+
   private async endMonitoringSession(reason: string): Promise<void> {
     const sessionId = this.monitoringSessionId;
     this.monitoringSessionId = undefined;
@@ -812,7 +811,6 @@ export class AckWatchController implements AckWatchControllerPort {
       ingestionIssues: ledger.issues,
       ingestionDecisions: ledger.decisions,
       queueItems: this.workflowProjection.items,
-      queueActivities: this.workflowProjection.activities,
       storage: this.storageSnapshot,
       alerts: this.alerts?.snapshot() ?? {
         audio: 'disabled',

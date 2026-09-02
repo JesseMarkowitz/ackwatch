@@ -20,6 +20,17 @@ export interface MaterializedDeadline {
   readonly kind: 'unacknowledged' | 'acknowledged';
 }
 
+/**
+ * The newest activity's display fields, copied onto the item so a card can render without the
+ * whole activity table. Maintained by persistence; no domain rule reads or branches on it.
+ */
+export interface LatestActivitySummary {
+  readonly eventId: string;
+  readonly sender: string;
+  readonly preview: string;
+  readonly roomName?: string | undefined;
+}
+
 export interface QueueItem {
   readonly id: string;
   readonly accountId: string;
@@ -40,6 +51,7 @@ export interface QueueItem {
   readonly completedAt?: number | undefined;
   readonly reopenedCount: number;
   readonly deadline?: MaterializedDeadline | undefined;
+  readonly latestActivity?: LatestActivitySummary | undefined;
 }
 
 export interface QueueActivity {

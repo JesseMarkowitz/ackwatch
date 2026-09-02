@@ -209,23 +209,23 @@ export class ScaleBenchmark {
       this.progressState.phase = `measuring at ${ladderPoint}`;
       // The controller refreshes the whole projection after every accepted event, so the honest
       // per-event cost is one accept plus one projection at the current store size.
-      const [projection, projectionMs] = await timed(() => repository.projection(accountId));
+      const [projection, projectionMs] = await timed(() => repository.uiProjection(accountId));
       const singleStarted = now();
       clock += 1_000;
       await repository.acceptActivity(
         activityInput(seeded, Math.floor(seeded / conversationStride) * conversationStride, clock),
       );
-      await repository.projection(accountId);
+      await repository.uiProjection(accountId);
       const perEventMs = now() - singleStarted;
       seeded += 1;
 
       samples.push({
-        activities: projection.activities.length,
+        activities: seeded,
         items: projection.items.length,
         projectionMs,
         acceptMs: batchSize === 0 ? 0 : acceptMs / batchSize,
         perEventMs,
-        transitions: projection.transitions.length,
+        transitions: projection.items.length,
       });
     }
 

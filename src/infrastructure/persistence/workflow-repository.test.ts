@@ -605,3 +605,50 @@ describe('work session lifecycle', () => {
     expect(repository.unsafeDatabaseForTests().verno).toBe(4);
   });
 });
+
+describe('denormalized latest activity', () => {
+  it('carries the newest activity onto the item and follows edits and redactions', async () => {
+    const repository = await createRepository();
+    await repository.acceptActivity(activity('$first', { preview: 'First message' }));
+    await repository.acceptActivity(
+      activity('$second', {
+        preview: 'Second message',
+        detectedAt: 2_000,
+        relationKind: 'thread',
+        relationEventId: '$first',
+        roomName: 'Handoff room',
+      }),
+    );
+
+    const afterAccept = (await repository.projection(accountId)).items[0];
+    expect(afterAccept?.latestActivity).toMatchObject({
+      eventId: '$second',
+      preview: 'Second message',
+      roomName: 'Handoff room',
+    });
+
+    // Editing the newest activity must move the card with it.
+    await repository.applyMaintenance(accountId, '$second', {
+      kind: 'apply_edit',
+      preview: 'Second message, corrected',
+    });
+    expect((await repository.projection(accountId)).items[0]?.latestActivity).toMatchObject({
+      eventId: '$second',
+      preview: 'Second message, corrected',
+    });
+
+    // Editing an older activity must not.
+    await repository.applyMaintenance(accountId, '$first', {
+      kind: 'apply_edit',
+      preview: 'First message, corrected',
+    });
+    expect((await repository.projection(accountId)).items[0]?.latestActivity).toMatchObject({
+      preview: 'Second message, corrected',
+    });
+
+    await repository.applyMaintenance(accountId, '$second', { kind: 'apply_redaction' });
+    expect((await repository.projection(accountId)).items[0]?.latestActivity).toMatchObject({
+      preview: 'Message removed',
+    });
+  });
+});

@@ -37,6 +37,14 @@ const deadlineSchema = z.object({
   kind: z.enum(['unacknowledged', 'acknowledged']),
 });
 const queueItemSchema: z.ZodType<QueueItem> = z.object({
+  latestActivity: z
+    .object({
+      eventId: z.string().min(1),
+      sender: z.string().min(1),
+      preview: z.string(),
+      roomName: z.string().optional(),
+    })
+    .optional(),
   id: z.string().min(1),
   accountId: z.string().min(1),
   conversationKey: z.string().min(1),
@@ -226,6 +234,12 @@ export interface AcceptedActivityInput {
 
 export type PersistenceFaultPoint =
   'after_activity' | 'after_item' | 'after_conversation' | 'after_transition' | 'after_effect';
+
+export interface UiProjection {
+  readonly items: readonly QueueItem[];
+  readonly deliveries: readonly AlertDeliveryRecord[];
+  readonly quarantineCount: number;
+}
 
 export interface WorkflowProjection {
   readonly items: readonly QueueItem[];
@@ -456,7 +470,24 @@ export class WorkflowRepository {
                 settings: queueSettings(settings),
                 ...(rootEventId === undefined ? {} : { rootEventId }),
               });
-          await this.database.queueItems.put(queueItemSchema.parse(mutation.item));
+          // The card renders the newest activity, so the item carries a copy of it. Gap recovery can
+          // deliver an older event after a newer one, so only a genuinely newer activity replaces it.
+          const previousLatest = itemRecord?.latestActivity;
+          const isNewer =
+            !previousLatest ||
+            activity.detectedAt > (itemRecord?.lastActivityAt ?? 0) ||
+            activity.detectedAt === (itemRecord?.lastActivityAt ?? 0);
+          const latestActivity = isNewer
+            ? {
+                eventId: activity.eventId,
+                sender: activity.sender,
+                preview: activity.preview,
+                ...(activity.roomName === undefined ? {} : { roomName: activity.roomName }),
+              }
+            : previousLatest;
+          await this.database.queueItems.put(
+            queueItemSchema.parse({ ...mutation.item, latestActivity }),
+          );
           this.inject(faultAfter, 'after_item');
 
           if (!itemRecord) {
@@ -807,14 +838,35 @@ export class WorkflowRepository {
     command: ActivityMaintenanceCommand,
   ): Promise<boolean> {
     const id = recordId(accountId, targetEventId);
-    return await this.database.transaction('rw', this.database.activities, async () => {
-      const existing = await this.database.activities.get(id);
-      if (!existing) return false;
-      await this.database.activities.put(
-        activitySchema.parse(applyActivityMaintenance(activitySchema.parse(existing), command)),
-      );
-      return true;
-    });
+    return await this.database.transaction(
+      'rw',
+      [this.database.activities, this.database.queueItems],
+      async () => {
+        const existing = await this.database.activities.get(id);
+        if (!existing) return false;
+        const updated = activitySchema.parse(
+          applyActivityMaintenance(activitySchema.parse(existing), command),
+        );
+        await this.database.activities.put(updated);
+        // An edit, redaction, or late decryption of the newest activity changes what the card
+        // shows, so the denormalized copy has to move with it.
+        const item = await this.database.queueItems.get(updated.itemId);
+        if (item?.latestActivity?.eventId === updated.eventId) {
+          await this.database.queueItems.put(
+            queueItemSchema.parse({
+              ...item,
+              latestActivity: {
+                ...item.latestActivity,
+                sender: updated.sender,
+                preview: updated.preview,
+                ...(updated.roomName === undefined ? {} : { roomName: updated.roomName }),
+              },
+            }),
+          );
+        }
+        return true;
+      },
+    );
   }
 
   public async recordIngestionIssue(
@@ -1021,6 +1073,48 @@ export class WorkflowRepository {
   public async queueItem(accountId: string, itemId: string): Promise<QueueItem | undefined> {
     const raw = await this.database.queueItems.get(itemId);
     return raw && raw.accountId === accountId ? queueItemSchema.parse(raw) : undefined;
+  }
+
+  /** Activities for one item, fetched by index when its detail is opened. */
+  public async itemActivities(
+    accountId: string,
+    itemId: string,
+  ): Promise<readonly QueueActivity[]> {
+    const rows = await this.database.activities
+      .where('[accountId+itemId]')
+      .equals([accountId, itemId])
+      .toArray();
+    return rows
+      .map((row) => activitySchema.parse(row))
+      .sort(
+        (left, right) =>
+          left.detectedAt - right.detectedAt ||
+          left.localSequence - right.localSequence ||
+          left.eventId.localeCompare(right.eventId),
+      );
+  }
+
+  /**
+   * What the queue view needs. Cards render from the item's denormalized latest activity, so the
+   * activity and transition tables — the two that grow without bound — are not read at all.
+   */
+  public async uiProjection(accountId: string): Promise<UiProjection> {
+    const [rawItems, rawDeliveries, quarantineCount] = await Promise.all([
+      this.database.queueItems.where('accountId').equals(accountId).toArray(),
+      this.database.alertDeliveries.where('accountId').equals(accountId).toArray(),
+      this.database.quarantine.where('accountId').equals(accountId).count(),
+    ]);
+    const items: QueueItem[] = [];
+    for (const raw of rawItems) {
+      const parsed = queueItemSchema.safeParse(raw);
+      if (parsed.success) items.push(parsed.data);
+      else await this.quarantineItem(accountId, raw, parsed.error.message);
+    }
+    return {
+      items: items.sort(compareQueueItems),
+      deliveries: rawDeliveries.map((value) => deliverySchema.parse(value)),
+      quarantineCount,
+    };
   }
 
   public async projection(accountId: string): Promise<WorkflowProjection> {

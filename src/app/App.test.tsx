@@ -72,11 +72,21 @@ describe('foundation shell', () => {
           updatedAt: 1_000,
           reopenedCount: 0,
           deadline: { kind: 'unacknowledged', firstAt: 301_000, repeatEveryMs: 300_000 },
+          latestActivity: {
+            eventId: '$event',
+            sender: '@sender:example.test',
+            preview: 'Needs attention',
+          },
         },
       ],
-      queueActivities: [
+    };
+    const controller: AckWatchControllerPort = {
+      getSnapshot: () => snapshot,
+      subscribe: () => () => undefined,
+      continueInterruptedSession: async () => undefined,
+      loadItemActivities: async () => [
         {
-          id: 'activity-a',
+          id: '@operator:example.test|$event',
           accountId: '@operator:example.test|https://example.test',
           eventId: '$event',
           itemId: 'item-a',
@@ -84,7 +94,7 @@ describe('foundation shell', () => {
           sender: '@sender:example.test',
           eventType: 'm.room.message',
           messageType: 'm.text',
-          preview: '<b>rendered as text</b>',
+          preview: 'Needs attention',
           detectedAt: 1_000,
           localSequence: 1,
           provenance: 'live',
@@ -94,11 +104,6 @@ describe('foundation shell', () => {
           relationKind: 'independent',
         },
       ],
-    };
-    const controller: AckWatchControllerPort = {
-      getSnapshot: () => snapshot,
-      subscribe: () => () => undefined,
-      continueInterruptedSession: async () => undefined,
       startNewSession: async () => undefined,
       endSession: async () => undefined,
       initialize: async () => undefined,

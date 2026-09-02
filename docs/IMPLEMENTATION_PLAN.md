@@ -361,6 +361,17 @@ The release command MUST execute, in a documented order:
 - dependency/license/secret scans;
 - screenshot gallery and test report generation.
 
+### 8.3a Phase 5 decisions (approved 2026-09-02)
+
+These were decided by the developer during Phase 5 and are normative for the remaining work.
+
+- **Session scope.** AckWatch monitors for a working session, not indefinitely. Recorded as SES-001–009 and ADR-0010. Ending a session archives a redacted summary before clearing its work; account configuration is preserved. The continuity window is measured from session start and defaults to 12 hours, configurable. Measuring from session start rather than last activity was chosen knowing a session open longer than the window is retired on the next reload even if the user never left.
+- **Escalation.** At most the currently due stage is materialized (DDL-007).
+- **Deployment and CSP.** V1 ships a documented CSP template with a placeholder the deployer fills in with their homeserver and webhook origins. This keeps self-hosting and arbitrary homeservers possible at the cost of a documented setup step.
+- **Performance targets at 10,000 activities / 1,000 items.** Command under 100 ms, per ingested event under 50 ms, one scheduler pass under 500 ms. Measured against `npm run test:scale`.
+- **Browser matrix.** Chromium and Firefox are required. WebKit runs advisory-only through Playwright, and the release notes must state plainly that this is not real Safari.
+- **Soak.** Six hours, modelling a double shift, since the product is used across three-hour shifts and occasional doubles. Scheduled by the developer because it occupies the machine.
+
 ### 8.4 Gate 5 evidence
 
 - Full report with no unexplained skips.

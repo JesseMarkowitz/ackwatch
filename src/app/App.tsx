@@ -36,7 +36,6 @@ function snapshotFromView(view: FoundationViewModel): AppSnapshot {
     ingestionIssues: [],
     ingestionDecisions: [],
     queueItems: [],
-    queueActivities: [],
     storage: { available: true, persistenceSupported: false },
     alerts: { audio: 'disabled', notifications: 'disabled', webhook: 'disabled' },
     crypto: {
@@ -601,13 +600,6 @@ function LoginPanel({
   );
 }
 
-function itemActivity(
-  item: QueueItem,
-  activities: readonly QueueActivity[],
-): QueueActivity | undefined {
-  return activities.filter(({ itemId }) => itemId === item.id).at(-1);
-}
-
 function deadlineLabel(item: QueueItem): string {
   if (!item.deadline) return 'No active deadline';
   return `${item.deadline.kind === 'acknowledged' ? 'Pending-work' : 'Unacknowledged'} deadline ${new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(item.deadline.firstAt)}`;
@@ -615,16 +607,16 @@ function deadlineLabel(item: QueueItem): string {
 
 function QueueCard({
   item,
-  activities,
   controller,
   openDetails,
 }: {
   readonly item: QueueItem;
-  readonly activities: readonly QueueActivity[];
   readonly controller: AckWatchControllerPort | undefined;
   readonly openDetails: (itemId: string) => void;
 }) {
-  const latest = itemActivity(item, activities);
+  // Rendered from the item's own copy of its newest activity, so a card costs nothing to display
+  // regardless of how many activities the session has accumulated.
+  const latest = item.latestActivity;
   return (
     <article
       className={`queue-card ${item.needsAttention ? 'queue-card--attention' : ''}`}
@@ -682,14 +674,12 @@ function QueueSection({
   title,
   empty,
   items,
-  activities,
   controller,
   openDetails,
 }: {
   readonly title: string;
   readonly empty: string;
   readonly items: readonly QueueItem[];
-  readonly activities: readonly QueueActivity[];
   readonly controller: AckWatchControllerPort | undefined;
   readonly openDetails: (itemId: string) => void;
 }) {
@@ -710,7 +700,6 @@ function QueueSection({
             <QueueCard
               key={item.id}
               item={item}
-              activities={activities}
               controller={controller}
               openDetails={openDetails}
             />
@@ -723,19 +712,27 @@ function QueueSection({
 
 function ItemDetail({
   item,
-  activities,
   controller,
   close,
 }: {
   readonly item: QueueItem;
-  readonly activities: readonly QueueActivity[];
   readonly controller: AckWatchControllerPort | undefined;
   readonly close: () => void;
 }) {
   const panel = useRef<HTMLElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
-  const latest = itemActivity(item, activities);
-  const itemActivities = activities.filter(({ itemId }) => itemId === item.id);
+  // Only the opened item's activities are read, by index, rather than the whole account.
+  const [itemActivities, setItemActivities] = useState<readonly QueueActivity[]>([]);
+  useEffect(() => {
+    let active = true;
+    void controller?.loadItemActivities(item.id).then((loaded) => {
+      if (active) setItemActivities(loaded);
+    });
+    return () => {
+      active = false;
+    };
+  }, [controller, item.id]);
+  const latest = itemActivities.at(-1);
   const uri = latest ? matrixEventUri(latest.roomId, latest.eventId) : undefined;
   const [copyStatus, setCopyStatus] = useState('');
   const [resolvedDetail, setResolvedDetail] = useState<EventDetail>();
@@ -1258,7 +1255,6 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
               title="Needs attention"
               empty="No unseen or reopened work."
               items={attentionItems}
-              activities={snapshot.queueActivities}
               controller={controller}
               openDetails={openDetails}
             />
@@ -1266,7 +1262,6 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
               title="Open work"
               empty="Viewed and acknowledged work appears here."
               items={openItems}
-              activities={snapshot.queueActivities}
               controller={controller}
               openDetails={openDetails}
             />
@@ -1274,7 +1269,6 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
               title="Completed history"
               empty="Completed work remains here until explicit cleanup."
               items={completedItems}
-              activities={snapshot.queueActivities}
               controller={controller}
               openDetails={openDetails}
             />
@@ -1354,7 +1348,6 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
         <ItemDetail
           key={selectedItem.id}
           item={selectedItem}
-          activities={snapshot.queueActivities}
           controller={controller}
           close={() => setSelectedItemId(undefined)}
         />

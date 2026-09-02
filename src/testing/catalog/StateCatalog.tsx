@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 
 import type { AppSnapshot } from '../../application/app-controller';
 import { App } from '../../app/App';
-import type { QueueActivity, QueueItem } from '../../domain/queue';
+import type { QueueItem } from '../../domain/queue';
 import { defaultAccountSettings } from '../../infrastructure/persistence/workflow-repository';
 
 const baseCoverage: AppSnapshot['coverage'] = {
@@ -29,7 +29,6 @@ const signedOut: AppSnapshot = {
   ingestionIssues: [],
   ingestionDecisions: [],
   queueItems: [],
-  queueActivities: [],
   storage: { available: true, persistenceSupported: true, persistent: false },
   alerts: { audio: 'disabled', notifications: 'disabled', webhook: 'disabled' },
   crypto: {
@@ -55,7 +54,6 @@ const active = (coverage: Partial<AppSnapshot['coverage']> = {}): AppSnapshot =>
   ingestionIssues: [],
   ingestionDecisions: [],
   queueItems: [],
-  queueActivities: [],
   storage: { available: true, persistenceSupported: true, persistent: false },
   alerts: {
     audio: 'permission_required',
@@ -80,31 +78,17 @@ const active = (coverage: Partial<AppSnapshot['coverage']> = {}): AppSnapshot =>
 });
 
 const receivedAt = Date.UTC(2026, 7, 31, 13, 42);
-const queueActivity = (
-  eventId: string,
-  itemId: string,
-  preview: string,
-  sequence: number,
-): QueueActivity => ({
-  id: `@operator:example.test|${eventId}`,
-  accountId: '@operator:example.test|https://matrix.example.test',
-  eventId,
-  itemId,
-  roomId: '!operations:example.test',
-  roomName: 'Operations desk',
-  sender: '@dispatch:example.test',
-  eventType: 'm.room.message',
-  messageType: 'm.text',
-  preview,
-  detectedAt: receivedAt + sequence,
-  localSequence: sequence,
-  provenance: 'live',
-  contentState: 'clear',
-  edited: false,
-  redacted: false,
-  relationKind: 'independent',
-});
-const queueItem = (id: string, status: QueueItem['status']): QueueItem => ({
+const queueItem = (
+  id: string,
+  status: QueueItem['status'],
+  preview = 'Service check requires review before the next handoff.',
+): QueueItem => ({
+  latestActivity: {
+    eventId: `$${id}`,
+    sender: '@dispatch:example.test',
+    preview,
+    roomName: 'Operations desk',
+  },
   id,
   accountId: '@operator:example.test|https://matrix.example.test',
   conversationKey: `event:!operations:example.test:$${id}`,
@@ -131,33 +115,21 @@ const queueItem = (id: string, status: QueueItem['status']): QueueItem => ({
 });
 
 const attentionItem = queueItem('attention', 'NEW');
-const openItem = queueItem('open', 'ACKNOWLEDGED');
-const completedItem = queueItem('completed', 'COMPLETED');
-const encryptedItem = queueItem('encrypted', 'NEW');
+const openItem = queueItem('open', 'ACKNOWLEDGED', 'Waiting on the maintenance window owner.');
+const completedItem = queueItem(
+  'completed',
+  'COMPLETED',
+  'Deployment verification finished successfully.',
+);
+const encryptedItem = queueItem('encrypted', 'NEW', 'Encrypted message—waiting for keys');
 const overdueItem: QueueItem = {
-  ...queueItem('overdue', 'UNACKNOWLEDGED'),
+  ...queueItem('overdue', 'UNACKNOWLEDGED', 'Awaiting review past the first deadline.'),
   deadline: {
     kind: 'unacknowledged',
     firstAt: receivedAt - 60_000,
     repeatEveryMs: 300_000,
   },
 };
-const workflowActivities = [
-  queueActivity(
-    '$attention',
-    attentionItem.id,
-    'Service check requires review before the next handoff.',
-    1,
-  ),
-  queueActivity('$open', openItem.id, 'Waiting on the maintenance window owner.', 2),
-  queueActivity(
-    '$completed',
-    completedItem.id,
-    'Deployment verification finished successfully.',
-    3,
-  ),
-];
-
 const fixtures = {
   armed: active({ monitoring: 'armed' }),
   baseline: {
@@ -196,19 +168,14 @@ const fixtures = {
       },
     ],
     queueItems: [attentionItem],
-    queueActivities: [workflowActivities[0] as QueueActivity],
   },
   workflow: {
     ...active({ monitoring: 'armed' }),
     queueItems: [attentionItem, openItem, completedItem],
-    queueActivities: workflowActivities,
   },
   overdue: {
     ...active({ monitoring: 'armed' }),
     queueItems: [overdueItem],
-    queueActivities: [
-      queueActivity('$overdue', overdueItem.id, 'Awaiting review past the first deadline.', 4),
-    ],
     alertDeliveries: [
       {
         id: 'effect-overdue|webhook',
@@ -228,20 +195,6 @@ const fixtures = {
   'encrypted-placeholder': {
     ...active({ monitoring: 'armed' }),
     queueItems: [encryptedItem],
-    queueActivities: [
-      {
-        ...queueActivity(
-          '$encrypted',
-          encryptedItem.id,
-          'Encrypted message—waiting for room keys',
-          5,
-        ),
-        eventType: 'm.room.encrypted',
-        messageType: 'm.room.encrypted',
-        contentState: 'unavailable',
-        decryptionFailureCode: 'MEGOLM_UNKNOWN_INBOUND_SESSION_ID',
-      },
-    ],
   },
   'alerts-ready': {
     ...active({ monitoring: 'armed' }),
