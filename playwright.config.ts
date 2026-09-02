@@ -18,6 +18,9 @@ export default defineConfig({
   projects: [
     { name: 'chromium', use: { browserName: 'chromium' } },
     { name: 'firefox', use: { browserName: 'firefox' } },
+    // Advisory only, and never part of a gate: WebKit through Playwright is not Safari, and this
+    // project is not run unless `npm run setup:browsers:webkit` has installed it.
+    { name: 'webkit', use: { browserName: 'webkit' } },
   ],
   webServer: {
     // The production build is served under the policy published in docs/DEPLOYMENT.md, so the

@@ -5,8 +5,7 @@ import { resolve } from 'node:path';
 
 import { chromium } from '@playwright/test';
 
-const required = [
-  'ACKWATCH_MATRIX_HOMESERVER_URL',
+const explicitAccounts = [
   'ACKWATCH_MATRIX_MONITOR_USER_ID',
   'ACKWATCH_MATRIX_MONITOR_PASSWORD',
   'ACKWATCH_MATRIX_SENDER_A_USER_ID',
@@ -14,8 +13,20 @@ const required = [
   'ACKWATCH_MATRIX_SENDER_B_USER_ID',
   'ACKWATCH_MATRIX_SENDER_B_PASSWORD',
 ];
-const supplied = required.filter((name) => Boolean(process.env[name]));
-const missing = required.filter((name) => !process.env[name]);
+const required = ['ACKWATCH_MATRIX_HOMESERVER_URL', ...explicitAccounts];
+const hasHomeserver = Boolean(process.env.ACKWATCH_MATRIX_HOMESERVER_URL);
+const registrationToken = process.env.ACKWATCH_MATRIX_REGISTRATION_TOKEN ?? '';
+// Two ways to run: provision disposable accounts with a registration token, or use accounts the
+// developer created. Provisioning is preferred because those accounts deactivate themselves after.
+const provisioning = hasHomeserver && Boolean(registrationToken);
+const suppliedExplicit = explicitAccounts.filter((name) => Boolean(process.env[name]));
+const supplied = provisioning ? [1] : hasHomeserver ? suppliedExplicit : [];
+const missing = provisioning
+  ? []
+  : [
+      ...(hasHomeserver ? [] : ['ACKWATCH_MATRIX_HOMESERVER_URL']),
+      ...explicitAccounts.filter((name) => !process.env[name]),
+    ];
 const artifactsDirectory = resolve('artifacts/matrix');
 const manifestPath = resolve(artifactsDirectory, 'remote-matrix-manifest.json');
 
@@ -25,6 +36,8 @@ if (supplied.length === 0) {
     result: 'skipped',
     reason: 'Optional developer-provided Matrix credentials were not supplied.',
     requiredVariableNames: required,
+    alternative:
+      'Set ACKWATCH_MATRIX_HOMESERVER_URL and ACKWATCH_MATRIX_REGISTRATION_TOKEN to provision disposable accounts instead.',
   };
   writeFileSync(manifestPath, `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write('SKIP: optional remote Matrix credentials were not supplied.\n');
@@ -49,21 +62,34 @@ if (
 const root = resolve(import.meta.dirname, '../..');
 const appUrl = 'http://127.0.0.1:4176';
 const runId = `${Date.now()}-${randomBytes(3).toString('hex')}`;
-const configuration = {
-  monitor: {
-    userId: process.env.ACKWATCH_MATRIX_MONITOR_USER_ID,
-    password: process.env.ACKWATCH_MATRIX_MONITOR_PASSWORD,
-  },
-  senderA: {
-    userId: process.env.ACKWATCH_MATRIX_SENDER_A_USER_ID,
-    password: process.env.ACKWATCH_MATRIX_SENDER_A_PASSWORD,
-  },
-  senderB: {
-    userId: process.env.ACKWATCH_MATRIX_SENDER_B_USER_ID,
-    password: process.env.ACKWATCH_MATRIX_SENDER_B_PASSWORD,
-  },
+const provisionedPasswords = new Map();
+const configuration = provisioning
+  ? {
+      monitor: { userId: undefined, password: undefined },
+      senderA: { userId: undefined, password: undefined },
+      senderB: { userId: undefined, password: undefined },
+    }
+  : {
+      monitor: {
+        userId: process.env.ACKWATCH_MATRIX_MONITOR_USER_ID,
+        password: process.env.ACKWATCH_MATRIX_MONITOR_PASSWORD,
+      },
+      senderA: {
+        userId: process.env.ACKWATCH_MATRIX_SENDER_A_USER_ID,
+        password: process.env.ACKWATCH_MATRIX_SENDER_A_PASSWORD,
+      },
+      senderB: {
+        userId: process.env.ACKWATCH_MATRIX_SENDER_B_USER_ID,
+        password: process.env.ACKWATCH_MATRIX_SENDER_B_PASSWORD,
+      },
+    };
+const manifest = {
+  runId,
+  mode: provisioning ? 'provisioned-disposable-accounts' : 'developer-provided-accounts',
+  result: 'running',
+  assertions: [],
+  cleanup: [],
 };
-const manifest = { runId, result: 'running', assertions: [], cleanup: [] };
 let appServer;
 let browser;
 let roomId;
@@ -102,6 +128,65 @@ async function matrixRequest(path, { method = 'GET', token, body } = {}) {
     );
   }
   return data;
+}
+
+/**
+ * Registers one disposable account through the registration-token flow. Synapse answers the first
+ * unauthenticated attempt with the flows it accepts and a session, then usually requires a dummy
+ * stage after the token is accepted.
+ */
+async function registerWithToken(localpartSuffix) {
+  const username = `ackwatch-test-${runId}-${localpartSuffix}`;
+  const password = randomBytes(24).toString('base64url');
+  const attempt = async (auth) => {
+    const response = await fetch(`${homeserverUrl}/_matrix/client/v3/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, inhibit_login: false, ...(auth ? { auth } : {}) }),
+    });
+    return { status: response.status, data: await response.json().catch(() => ({})) };
+  };
+
+  let current = await attempt(undefined);
+  const session = current.data.session;
+  if (!session) {
+    throw new Error(
+      `Registration did not offer a session; the homeserver may have registration disabled (${current.data.errcode ?? current.status}).`,
+    );
+  }
+
+  // Use the stage the homeserver actually asks for. A server configured with
+  // `registration_requires_token` offers the token stage; one with registration merely enabled
+  // offers only a dummy stage, which means it is open to anyone — recorded rather than glossed
+  // over, because it is a property of the server being tested against.
+  const stages = new Set(
+    (Array.isArray(current.data.flows) ? current.data.flows : []).flatMap((flow) =>
+      Array.isArray(flow.stages) ? flow.stages : [],
+    ),
+  );
+  const usesToken = stages.has('m.login.registration_token');
+  manifest.registrationTokenRequired = usesToken;
+  if (!usesToken && !manifest.assertions.includes('homeserver-registration-is-open')) {
+    manifest.assertions.push('homeserver-registration-is-open');
+  }
+
+  if (usesToken) {
+    current = await attempt({
+      type: 'm.login.registration_token',
+      token: registrationToken,
+      session,
+    });
+  }
+  if (current.status === 401) {
+    current = await attempt({ type: 'm.login.dummy', session });
+  }
+  if (current.status !== 200 || !current.data.access_token) {
+    throw new Error(
+      `Disposable account registration failed (${current.data.errcode ?? current.status}: ${current.data.error ?? 'no detail'}).`,
+    );
+  }
+  provisionedPasswords.set(current.data.user_id, password);
+  return current.data;
 }
 
 async function login({ userId, password }) {
@@ -177,10 +262,9 @@ async function cleanup() {
       }
     }
   }
-  const tokens = [...sessions.map((session) => session.access_token), ...browserTokens].filter(
-    Boolean,
-  );
-  for (const token of tokens) {
+  // Browser sessions are logged out first: deactivation below ends every session for the account,
+  // so a logout attempted afterwards would fail for a reason that is not a failure.
+  for (const token of browserTokens.filter(Boolean)) {
     try {
       await matrixRequest('/_matrix/client/v3/logout', { method: 'POST', token, body: {} });
       manifest.cleanup.push('session-logged-out');
@@ -188,14 +272,72 @@ async function cleanup() {
       manifest.cleanup.push('session-logout-failed');
     }
   }
+
+  // Deactivate only the accounts this run created. A developer-provided account is someone's real
+  // account and is never deactivated, whatever else fails.
+  for (const session of sessions) {
+    const password = provisionedPasswords.get(session.user_id);
+    if (!provisioning || !password) continue;
+    try {
+      await matrixRequest('/_matrix/client/v3/account/deactivate', {
+        method: 'POST',
+        token: session.access_token,
+        body: {
+          auth: {
+            type: 'm.login.password',
+            identifier: { type: 'm.id.user', user: session.user_id },
+            password,
+          },
+          erase: true,
+        },
+      });
+      manifest.cleanup.push('disposable-account-deactivated');
+    } catch {
+      // Left behind rather than silently claimed clean: the manifest says so, and the account
+      // carries the run ID in its localpart so it can be found and removed by hand.
+      manifest.cleanup.push('disposable-account-deactivation-failed');
+    }
+  }
+
+  if (!provisioning) {
+    for (const token of sessions.map((session) => session.access_token).filter(Boolean)) {
+      try {
+        await matrixRequest('/_matrix/client/v3/logout', { method: 'POST', token, body: {} });
+        manifest.cleanup.push('session-logged-out');
+      } catch {
+        manifest.cleanup.push('session-logout-failed');
+      }
+    }
+  }
 }
 
 async function main() {
-  sessions = await Promise.all([
-    login(configuration.monitor),
-    login(configuration.senderA),
-    login(configuration.senderB),
-  ]);
+  sessions = provisioning
+    ? await Promise.all([
+        registerWithToken('monitor'),
+        registerWithToken('sender-a'),
+        registerWithToken('sender-b'),
+      ])
+    : await Promise.all([
+        login(configuration.monitor),
+        login(configuration.senderA),
+        login(configuration.senderB),
+      ]);
+  if (provisioning) {
+    const [provisionedMonitor, provisionedA, provisionedB] = sessions;
+    configuration.monitor = {
+      userId: provisionedMonitor.user_id,
+      password: provisionedPasswords.get(provisionedMonitor.user_id),
+    };
+    configuration.senderA = {
+      userId: provisionedA.user_id,
+      password: provisionedPasswords.get(provisionedA.user_id),
+    };
+    configuration.senderB = {
+      userId: provisionedB.user_id,
+      password: provisionedPasswords.get(provisionedB.user_id),
+    };
+  }
   const [monitor, senderA, senderB] = sessions;
   const room = await matrixRequest('/_matrix/client/v3/createRoom', {
     method: 'POST',

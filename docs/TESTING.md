@@ -8,7 +8,16 @@
 - `npm run test:visual`: deterministic Chromium state screenshots and an HTML gallery.
 - `npm run test:matrix:local`: fresh pinned Synapse, three synthetic users, browser monitoring
   boundary assertions, cleanup, and teardown.
-- `npm run test:matrix:remote`: explicitly records a skip when optional credentials are absent.
+- `npm run test:matrix:remote`: runs against a developer-provided homeserver, and explicitly records
+  a skip when neither a registration token nor account credentials are supplied. Given
+  `ACKWATCH_MATRIX_HOMESERVER_URL` and `ACKWATCH_MATRIX_REGISTRATION_TOKEN` it provisions three
+  disposable accounts per run, then deactivates and erases them; given the six account variables it
+  uses those accounts and never deactivates them, because they are someone's real accounts. The
+  manifest records which registration stage the homeserver asked for, so a server that accepts
+  registration without a token is visible in the evidence rather than assumed.
+- `npm run test:browser:webkit`: advisory only, never part of a gate. Install it first with
+  `npm run setup:browsers:webkit`. WebKit through Playwright is not Safari and must not be described
+  as Safari support.
 - `npm run test:webhook:local`: pinned self-hosted ntfy contract and redacted manifest.
 - `npm run test:scale`: drives the real repository against real IndexedDB in Chromium at ten
   thousand activities, publishing a growth curve to `artifacts/reports/scale-summary.json`. The
@@ -25,6 +34,10 @@ Steps in the Gate 4 chain that leave no artifact of their own record a marker un
 `artifacts/reports/steps/` as they pass, and the chain clears those markers before it starts. The
 Gate 4 report reads them rather than asserting that a step it never observed succeeded, so it
 cannot be generated from a partial run.
+
+WebKit additionally needs system libraries that Playwright installs with `sudo`; on a machine
+without them the advisory project cannot run at all, which is a limitation of the machine and is
+recorded rather than worked around.
 
 Run `npm run setup:browsers` once after installation to place the pinned Chromium and Firefox
 binaries in the ignored project cache.

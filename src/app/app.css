@@ -295,6 +295,24 @@ button:disabled {
   background: #b5372d;
 }
 
+.button-danger {
+  border-color: rgba(125, 33, 27, 0.45);
+  color: #681e19;
+  background: #f7d8d0;
+}
+
+.button-danger:hover {
+  background: #f0c4b8;
+}
+
+.storage-card__note {
+  max-width: 60ch;
+  margin: 0 0 0.6rem;
+  font-size: 0.75rem;
+  color: inherit;
+  opacity: 0.85;
+}
+
 .session-prompt,
 .session-notice {
   display: flex;

@@ -955,6 +955,8 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
   const [selectedItemId, setSelectedItemId] = useState<string>();
   const [settingsTransfer, setSettingsTransfer] = useState('');
   const [settingsStatus, setSettingsStatus] = useState('');
+  // Clearing is irreversible, so the control asks a second time rather than acting on one click.
+  const [clearArmed, setClearArmed] = useState(false);
   const selectedItem = snapshot.queueItems.find(({ id }) => id === selectedItemId);
   const attentionItems = snapshot.queueItems.filter(
     (item) => item.status !== 'COMPLETED' && item.needsAttention,
@@ -1336,6 +1338,51 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
                   </button>
                 </div>
                 <p aria-live="polite">{settingsStatus}</p>
+              </details>
+              <details>
+                <summary>Diagnostics and cleanup</summary>
+                <p className="storage-card__note">
+                  A diagnostics report describes how this installation is behaving using counts,
+                  codes and timings only. It carries no message text, room or event identifiers,
+                  senders, or webhook destination, so it is safe to attach to a bug report.
+                </p>
+                <div>
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={() => {
+                      void controller?.exportDiagnostics().then((value) => {
+                        if (value) setSettingsTransfer(value);
+                        setSettingsStatus(
+                          value
+                            ? 'Diagnostics report prepared for copy.'
+                            : 'No diagnostics available.',
+                        );
+                      });
+                    }}
+                  >
+                    Export diagnostics
+                  </button>
+                  <button
+                    type="button"
+                    className="button-danger"
+                    onClick={() => {
+                      if (clearArmed) {
+                        void controller?.clearStoredData().then(() => {
+                          setClearArmed(false);
+                          setSettingsStatus('Stored data for this account was cleared.');
+                        });
+                        return;
+                      }
+                      setClearArmed(true);
+                      setSettingsStatus(
+                        'This permanently deletes this account\u2019s queue, history and settings. Press again to confirm.',
+                      );
+                    }}
+                  >
+                    {clearArmed ? 'Confirm clear' : 'Clear stored data'}
+                  </button>
+                </div>
               </details>
             </div>
           </section>

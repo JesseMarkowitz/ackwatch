@@ -1,4 +1,5 @@
 import Dexie from 'dexie';
+import { flushSync } from 'react-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import { createElement, StrictMode } from 'react';
 
@@ -312,21 +313,26 @@ export class ScaleBenchmark {
     return timings;
   }
 
-  /** Renders the real App component tree against a full-size projection. */
+  /**
+   * Renders the real App component tree against a full-size projection. The render is flushed
+   * synchronously: React 19 commits asynchronously by default, so timing `render()` alone measures
+   * scheduling rather than the work, and reports a figure far too good to be true.
+   */
   private measureRender(items: readonly QueueItem[], activities: readonly QueueActivity[]): number {
     const host = document.createElement('div');
     document.body.append(host);
     this.root = createRoot(host);
     const started = now();
-    this.root.render(
-      createElement(
-        StrictMode,
-        null,
-        createElement(App, { snapshot: syntheticSnapshot(items, activities) }),
-      ),
-    );
-    // React 19 commits synchronously inside flushSync-free roots on the next microtask boundary;
-    // reading layout forces the commit and any resulting style/layout work to complete.
+    flushSync(() => {
+      this.root?.render(
+        createElement(
+          StrictMode,
+          null,
+          createElement(App, { snapshot: syntheticSnapshot(items, activities) }),
+        ),
+      );
+    });
+    // Force style and layout so the measurement includes what the browser must do to show it.
     void host.getBoundingClientRect().height;
     const elapsed = now() - started;
     this.root.unmount();

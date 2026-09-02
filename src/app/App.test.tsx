@@ -84,6 +84,8 @@ describe('foundation shell', () => {
       getSnapshot: () => snapshot,
       subscribe: () => () => undefined,
       continueInterruptedSession: async () => undefined,
+      exportDiagnostics: async () => undefined,
+      clearStoredData: async () => undefined,
       loadItemActivities: async () => [
         {
           id: '@operator:example.test|$event',

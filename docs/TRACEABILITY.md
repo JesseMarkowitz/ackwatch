@@ -70,5 +70,10 @@ than passed when credentials are absent.
 
 | SEC/§8.1 CSP | `tests/browser/csp.spec.ts` under the policy in `docs/DEPLOYMENT.md`, applied by the browser suite's web server | The production build runs under a policy with no `'unsafe-inline'` and no `'unsafe-eval'`: IndexedDB opens, WebAssembly compiles, and the bundled `data:` alert tone plays with zero reported violations in Chromium and Firefox. Qualification found two things documentation alone would have shipped wrong: the build inlines two font subsets as `data:` URIs, and Zod's JIT probe reported a caught `Function` attempt until `jitless` was set. `connect-src` remains deployer-completed by design. |
 
-Phase 5 items not yet claimed: the six-hour soak, storage export/clear and diagnostics export, the
-advisory WebKit run, and the developer-provided homeserver scenario.
+| DB-007, DB-008 | `diagnostics and cleanup` group in `workflow-repository.test.ts`; storage card controls | A diagnostics report carries counts, codes and timings only — asserted to contain no preview text, room or event ID, sender, account ID, webhook endpoint or topic. Clearing stored data is an explicit two-press action. The configured diagnostics retention is now enforced on startup and ages out only finished records: live workflow and unresolved issues are never removed. |
+| §8.3 remote homeserver | `artifacts/matrix/remote-matrix-manifest.json` via `npm run test:matrix:remote` | Passes against a developer-provided homeserver with 8 assertions, provisioning three disposable accounts per run and deactivating and erasing them afterwards. Developer-supplied accounts are never deactivated. |
+
+Phase 5 items not yet claimed: the six-hour soak, which is scheduled by the developer because it
+occupies the machine; and the advisory WebKit run, which cannot execute here because WebKit's system
+libraries need root to install. WebKit is wired up and documented as advisory, not as Safari
+support.

@@ -91,6 +91,8 @@ export interface AckWatchControllerPort {
   applyQueueCommand(itemId: string, command: QueueCommand['kind']): Promise<void>;
   requestPersistentStorage(): Promise<void>;
   exportSettings(): Promise<string | undefined>;
+  exportDiagnostics(): Promise<string | undefined>;
+  clearStoredData(): Promise<void>;
   importSettings(serialized: string): Promise<void>;
   updateSettings(patch: Partial<AccountSettingsRecord>): Promise<void>;
   requestNotificationPermission(): Promise<void>;
@@ -173,6 +175,9 @@ export interface WorkflowRepositoryPort extends AlertRepositoryPort {
   getSettings(accountId: string): Promise<AccountSettingsRecord>;
   putSettings(settings: AccountSettingsRecord): Promise<void>;
   exportSettings(accountId: string): Promise<string>;
+  diagnosticsReport(accountId: string, now: number): Promise<string>;
+  pruneDiagnostics(accountId: string, now: number): Promise<number>;
+  clearAccount(accountId: string): Promise<void>;
   importSettings(accountId: string, serialized: string): Promise<AccountSettingsRecord>;
   retryAlertDelivery(accountId: string, deliveryId: string, now: number): Promise<void>;
   close(): void;
@@ -542,6 +547,11 @@ export class AckWatchController implements AckWatchControllerPort {
       await workflow.open();
       this.workflowProjection = await workflow.uiProjection(credentials.accountId);
       this.accountSettings = await workflow.getSettings(credentials.accountId);
+      // Applies the configured diagnostics retention once per startup; failure to prune must never
+      // prevent monitoring, so it is reported and not fatal.
+      await workflow
+        .pruneDiagnostics(credentials.accountId, this.clock.now())
+        .catch((error: unknown) => this.handleWorkflowFailure(error));
       startupStage = 'work session resolution';
       await this.resolveWorkSession(workflow, credentials.accountId);
       startupStage = 'alert coordinator initialization';
@@ -761,6 +771,36 @@ export class AckWatchController implements AckWatchControllerPort {
     }
     this.emit();
     return this.archivedSummary;
+  }
+
+  public async exportDiagnostics(): Promise<string | undefined> {
+    const accountId = this.credentials?.accountId;
+    if (!accountId || !this.workflow) return undefined;
+    return await this.workflow.diagnosticsReport(accountId, this.clock.now());
+  }
+
+  /**
+   * Removes everything this account has stored, including its configuration and session history.
+   * Monitoring stops first so nothing is written back in behind the deletion.
+   */
+  public async clearStoredData(): Promise<void> {
+    const accountId = this.credentials?.accountId;
+    if (!accountId || !this.workflow) return;
+    try {
+      this.coverage.stopMonitoring();
+      await this.endMonitoringSession('storage_cleared');
+      this.alerts?.stop();
+      await this.workflow.clearAccount(accountId);
+      this.workSession = undefined;
+      this.sessionState = 'none';
+      this.sessionNotice = 'Stored data for this account was cleared.';
+      this.archivedSummary = undefined;
+      this.accountSettings = await this.workflow.getSettings(accountId);
+      await this.refreshWorkflow();
+    } catch (error: unknown) {
+      this.handleWorkflowFailure(error);
+    }
+    this.emit();
   }
 
   public async loadItemActivities(itemId: string): Promise<readonly QueueActivity[]> {

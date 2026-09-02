@@ -652,3 +652,87 @@ describe('denormalized latest activity', () => {
     });
   });
 });
+
+describe('diagnostics and cleanup', () => {
+  it('describes behaviour without carrying content, identifiers or destinations', async () => {
+    const repository = await createRepository();
+    await repository.acceptActivity(
+      activity('$sensitive', {
+        preview: 'CONFIDENTIAL BODY',
+        roomId: '!private:example.test',
+        sender: '@informant:example.test',
+        roomName: 'Private room',
+      }),
+    );
+    await repository.putSettings({
+      ...defaultAccountSettings(accountId, 1_000),
+      webhookEnabled: true,
+      webhookEndpoint: 'https://receiver.example.test/secret-path',
+      webhookTopic: 'secret-topic',
+      updatedAt: 1_000,
+    });
+
+    const report = await repository.diagnosticsReport(accountId, 50_000);
+
+    for (const secret of [
+      'CONFIDENTIAL BODY',
+      '!private:example.test',
+      '$sensitive',
+      '@informant:example.test',
+      'Private room',
+      'receiver.example.test',
+      'secret-path',
+      'secret-topic',
+      '@monitor:example.test',
+    ]) {
+      expect(report, `diagnostics must not contain ${secret}`).not.toContain(secret);
+    }
+    expect(JSON.parse(report)).toMatchObject({
+      kind: 'ackwatch-diagnostics',
+      queue: { items: 1, itemsByStatus: { NEW: 1 } },
+      configuration: { webhookEnabled: true, webhookPreset: 'generic' },
+    });
+  });
+
+  it('ages out finished diagnostics but never live work or unresolved issues', async () => {
+    const repository = await createRepository();
+    const day = 24 * 60 * 60_000;
+    const now = 400 * day;
+    await repository.acceptActivity(activity('$live'));
+    await repository.recordIngestionIssue({
+      accountId,
+      code: 'malformed_event',
+      detail: 'Still open.',
+      detectedAt: 1_000,
+    });
+    const database = repository.unsafeDatabaseForTests();
+    await database.alertAttempts.add({
+      id: 'old-attempt',
+      accountId,
+      effectId: 'effect',
+      deliveryId: 'delivery',
+      transport: 'webhook',
+      attempt: 1,
+      startedAt: now - 90 * day,
+      outcome: 'exhausted',
+    });
+    await database.alertAttempts.add({
+      id: 'recent-attempt',
+      accountId,
+      effectId: 'effect',
+      deliveryId: 'delivery',
+      transport: 'webhook',
+      attempt: 2,
+      startedAt: now - 2 * day,
+      outcome: 'delivered',
+    });
+
+    await expect(repository.pruneDiagnostics(accountId, now)).resolves.toBe(1);
+
+    expect(await database.alertAttempts.get('old-attempt')).toBeUndefined();
+    expect(await database.alertAttempts.get('recent-attempt')).toBeDefined();
+    // Retention must never touch live workflow or an issue nobody has resolved.
+    expect((await repository.projection(accountId)).items).toHaveLength(1);
+    expect(await database.ingestionIssues.where('accountId').equals(accountId).count()).toBe(1);
+  });
+});

@@ -1160,6 +1160,132 @@ export class WorkflowRepository {
     };
   }
 
+  /**
+   * A support bundle describing how this installation is behaving. It carries counts, codes and
+   * timings only: no previews, room IDs, event IDs, senders, user IDs, tokens or endpoints, so it
+   * can be attached to a bug report without leaking who the operator watches or what was said.
+   */
+  public async diagnosticsReport(accountId: string, now: number): Promise<string> {
+    const database = this.database;
+    const tally = <T>(rows: readonly T[], key: (row: T) => string): Record<string, number> => {
+      const counts: Record<string, number> = {};
+      for (const row of rows) counts[key(row)] = (counts[key(row)] ?? 0) + 1;
+      return counts;
+    };
+    const [
+      items,
+      activities,
+      transitions,
+      effects,
+      deliveries,
+      attempts,
+      issues,
+      coverage,
+      quarantined,
+      sessions,
+      settings,
+    ] = await Promise.all([
+      database.queueItems.where('accountId').equals(accountId).toArray(),
+      database.activities.where('accountId').equals(accountId).count(),
+      database.workflowTransitions.where('accountId').equals(accountId).count(),
+      database.alertEffects.where('accountId').equals(accountId).toArray(),
+      database.alertDeliveries.where('accountId').equals(accountId).toArray(),
+      database.alertAttempts.where('accountId').equals(accountId).toArray(),
+      database.ingestionIssues.where('accountId').equals(accountId).toArray(),
+      database.coverageIssues.where('accountId').equals(accountId).toArray(),
+      database.quarantine.where('accountId').equals(accountId).count(),
+      database.workSessions.where('accountId').equals(accountId).toArray(),
+      this.getSettings(accountId),
+    ]);
+    const openSession = sessions.find(({ endedAt }) => endedAt === undefined);
+    return JSON.stringify(
+      {
+        kind: 'ackwatch-diagnostics',
+        version: 1,
+        generatedAt: new Date(now).toISOString(),
+        schema: { database: database.verno, settings: settings.schemaVersion },
+        session: {
+          open: openSession !== undefined,
+          ageMs: openSession ? now - openSession.startedAt : undefined,
+          endedThisInstall: sessions.length - (openSession ? 1 : 0),
+          continuityWindowMs: settings.sessionContinuityWindowMs,
+        },
+        queue: {
+          items: items.length,
+          itemsByStatus: tally(items, (item) => String(item.status)),
+          activities,
+          transitions,
+          quarantined,
+        },
+        alerts: {
+          effectsByStatus: tally(effects, (effect) => effect.status),
+          deliveriesByStatus: tally(deliveries, (delivery) => delivery.status),
+          deliveriesByTransport: tally(deliveries, (delivery) => delivery.transport),
+          attemptsByOutcome: tally(attempts, (attempt) => attempt.outcome),
+          // Error codes are AckWatch's own vocabulary and HTTP statuses, never receiver responses.
+          errorCodes: tally(
+            deliveries.filter(({ lastErrorCode }) => lastErrorCode !== undefined),
+            (delivery) => delivery.lastErrorCode ?? 'unknown',
+          ),
+        },
+        ingestion: { issuesByCode: tally(issues, (issue) => issue.code) },
+        coverage: {
+          issues: coverage.length,
+          issuesByStatus: tally(coverage, (issue) => issue.status),
+        },
+        configuration: {
+          previewPrivacy: settings.previewPrivacy,
+          audioEnabled: settings.audioEnabled,
+          browserNotificationsEnabled: settings.browserNotificationsEnabled,
+          // Whether a webhook is configured, never where it points or what authorizes it.
+          webhookEnabled: settings.webhookEnabled,
+          webhookPreset: settings.webhookPreset,
+          webhookTimeoutMs: settings.webhookTimeoutMs,
+          webhookMaxAttempts: settings.webhookMaxAttempts,
+          diagnosticsRetentionDays: settings.diagnosticsRetentionDays,
+          unacknowledgedAfterMs: settings.unacknowledgedAfterMs,
+          acknowledgedAfterMs: settings.acknowledgedAfterMs,
+        },
+      },
+      null,
+      2,
+    );
+  }
+
+  /**
+   * Applies the configured diagnostics retention. Only finished diagnostic records age out:
+   * unresolved issues and live workflow are never removed by retention.
+   */
+  public async pruneDiagnostics(accountId: string, now: number): Promise<number> {
+    const settings = await this.getSettings(accountId);
+    const cutoff = now - settings.diagnosticsRetentionDays * 24 * 60 * 60_000;
+    if (cutoff <= 0) return 0;
+    return await this.database.transaction(
+      'rw',
+      [this.database.alertAttempts, this.database.ingestionIssues, this.database.workSessions],
+      async () => {
+        const attempts = await this.database.alertAttempts
+          .where('[accountId+startedAt]')
+          .between([accountId, 0], [accountId, cutoff])
+          .primaryKeys();
+        if (attempts.length > 0) await this.database.alertAttempts.bulkDelete(attempts);
+        const issues = await this.database.ingestionIssues
+          .where('[accountId+status]')
+          .equals([accountId, 'resolved'])
+          .filter(({ detectedAt }) => detectedAt < cutoff)
+          .primaryKeys();
+        if (issues.length > 0) await this.database.ingestionIssues.bulkDelete(issues);
+        const staleSessions = await this.database.workSessions
+          .where('accountId')
+          .equals(accountId)
+          .filter(({ endedAt }) => endedAt !== undefined && endedAt < cutoff)
+          .primaryKeys();
+        if (staleSessions.length > 0) await this.database.workSessions.bulkDelete(staleSessions);
+        return attempts.length + issues.length + staleSessions.length;
+      },
+    );
+  }
+
   public async clearAccount(accountId: string): Promise<void> {
     await this.database.transaction(
       'rw',
