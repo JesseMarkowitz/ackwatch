@@ -5,7 +5,7 @@ import { createElement, StrictMode } from 'react';
 
 import { App } from '../../app/App';
 import type { AppSnapshot } from '../../application/app-controller';
-import type { QueueActivity, QueueItem } from '../../domain/queue';
+import type { QueueItem } from '../../domain/queue';
 import {
   defaultAccountSettings,
   WorkflowRepository,
@@ -98,7 +98,12 @@ async function countAll(database: WorkflowDatabase): Promise<Record<string, numb
   return Object.fromEntries(entries) as Record<string, number>;
 }
 
-function syntheticSnapshot(items: readonly QueueItem[], activities: readonly QueueActivity[]) {
+// The return type is declared rather than asserted. An `as unknown as AppSnapshot` cast used to
+// stand here, and it silenced the compiler when the work-session lifecycle added a required
+// `session` field: the benchmark kept rendering a snapshot the App could no longer read, and threw
+// `Cannot read properties of undefined` on every scale run until one was finally executed. A
+// declared return type contextually types the literal and fails the build on the next drift.
+function syntheticSnapshot(items: readonly QueueItem[]): AppSnapshot {
   return {
     phase: 'active',
     accountLabel: '@scale:benchmark.test',
@@ -115,7 +120,6 @@ function syntheticSnapshot(items: readonly QueueItem[], activities: readonly Que
     ingestionIssues: [],
     ingestionDecisions: [],
     queueItems: items,
-    queueActivities: activities,
     storage: { available: true, persistenceSupported: true, persistent: true },
     alerts: { audio: 'ready', notifications: 'ready', webhook: 'disabled' },
     crypto: {
@@ -125,7 +129,8 @@ function syntheticSnapshot(items: readonly QueueItem[], activities: readonly Que
       keyBackupReady: true,
       verification: 'idle',
     },
-  } as unknown as AppSnapshot;
+    session: { state: 'active', startedAt: 0, continuityWindowMs: 12 * 60 * 60 * 1000 },
+  };
 }
 
 export interface ScaleProgress {
@@ -262,7 +267,7 @@ export class ScaleBenchmark {
     }
     const schedulerMs = schedulerSamples.at(-1) ?? 0;
 
-    const renderMs = this.measureRender(finalProjection.items, finalProjection.activities);
+    const renderMs = this.measureRender(finalProjection.items);
     const finalCounts = await countAll(repository.unsafeDatabaseForTests());
     repository.close();
 
@@ -318,18 +323,14 @@ export class ScaleBenchmark {
    * synchronously: React 19 commits asynchronously by default, so timing `render()` alone measures
    * scheduling rather than the work, and reports a figure far too good to be true.
    */
-  private measureRender(items: readonly QueueItem[], activities: readonly QueueActivity[]): number {
+  private measureRender(items: readonly QueueItem[]): number {
     const host = document.createElement('div');
     document.body.append(host);
     this.root = createRoot(host);
     const started = now();
     flushSync(() => {
       this.root?.render(
-        createElement(
-          StrictMode,
-          null,
-          createElement(App, { snapshot: syntheticSnapshot(items, activities) }),
-        ),
+        createElement(StrictMode, null, createElement(App, { snapshot: syntheticSnapshot(items) })),
       );
     });
     // Force style and layout so the measurement includes what the browser must do to show it.
