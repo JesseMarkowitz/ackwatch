@@ -620,6 +620,7 @@ function QueueCard({
       className={`queue-card ${item.needsAttention ? 'queue-card--attention' : ''}`}
       data-item-id={item.id}
       data-event-id={latest?.eventId}
+      data-status={item.status}
     >
       <div className="queue-card__meta">
         <span>{latest?.roomName ?? item.roomId}</span>

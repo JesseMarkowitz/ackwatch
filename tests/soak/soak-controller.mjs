@@ -33,15 +33,45 @@ const users = ['monitor', 'sender'];
 const passwords = new Map(users.map((user) => [user, randomBytes(24).toString('base64url')]));
 const manifestPath = resolve(artifactsDirectory, 'soak-manifest.json');
 const samplesPath = resolve(artifactsDirectory, 'soak-samples.jsonl');
+// A run shorter than an hour cannot establish a six-hour trend, so its growth checks are recorded
+// and reported but do not decide the verdict. Everything else is judged the same either way.
+const smokeRun = soakMinutes < 60;
+
+// How much a per-item cost may rise over a shift before it reads as a leak. Half again as much
+// heap, or half again as many listeners, for the same amount of retained work is not steady state.
+const growthCeiling = Number.parseFloat(process.env.ACKWATCH_SOAK_GROWTH_CEILING ?? '1.5');
+
+// Console failures the disposable rig provokes that are not application defects, classified with
+// the same discipline the Gate 4 report applies to the Matrix run. Anything else is unexplained and
+// fails the soak rather than being buried in a manifest nobody reads.
+const expectedBrowserNoise = [
+  // matrix-js-sdk polls .well-known for the MXID's domain once the client starts. The synthetic
+  // `ackwatch.test` server name never resolves, and Synapse answers 404 for its own well-known.
+  /\/\.well-known\/matrix\//u,
+  /ERR_NAME_NOT_RESOLVED/u,
+  // The SDK also polls an unstable MSC4143 RTC-transports endpoint that Synapse does not implement.
+  /\/unstable\/org\.matrix\.msc4143\/rtc\/transports/u,
+  // Key backup is queried before this scenario ever creates one.
+  /\/room_keys\/version\b/u,
+  // The static test host intentionally serves no favicon.
+  /\/favicon\.ico$/u,
+  // The run drops the connection on purpose; the in-flight sync fails while it is offline.
+  /net::ERR_INTERNET_DISCONNECTED|Failed to fetch/u,
+];
+
 const manifest = {
   runId,
   plannedMinutes: soakMinutes,
-  smokeRun: soakMinutes < 60,
+  smokeRun,
   startedAt: new Date().toISOString(),
   result: 'running',
   totals: { sent: 0, accepted: 0, acknowledged: 0, completed: 0, reconnects: 0 },
   samples: 0,
+  // Recorded verbatim, with the failing URL where the browser reports one, so the classification
+  // below stays reviewable against a stored manifest instead of costing another six-hour run.
   browserErrors: [],
+  pageErrors: [],
+  checks: [],
 };
 let appServer;
 let browser;
@@ -123,21 +153,65 @@ async function login(username) {
   });
 }
 
-/** Counts the things a leak would show up in: live timers, listeners, and heap. */
-async function sample(page, elapsedMs) {
-  const reading = await page.evaluate(() => {
-    const memory = performance.memory;
-    return {
-      queueCards: document.querySelectorAll('[data-item-id]').length,
-      usedHeapBytes: memory?.usedJSHeapSize,
-    };
-  });
-  const entry = { at: new Date().toISOString(), elapsedMs, ...reading, ...manifest.totals };
+// Counts the things a leak shows up in before the heap does. `performance.memory` is deliberately
+// not used: Chromium buckets and caches it unless precise memory info is enabled, which is why an
+// earlier smoke run reported an identical 15,200,000 bytes in all eight samples while the queue
+// grew from zero to twenty-two. CDP reports the real figure, and collecting first means the reading
+// is retention rather than garbage that had not been swept yet.
+async function sample(page, cdp, elapsedMs) {
+  await cdp.send('HeapProfiler.collectGarbage').catch(() => undefined);
+  const { metrics = [] } = await cdp.send('Performance.getMetrics').catch(() => ({ metrics: [] }));
+  const byName = new Map(metrics.map(({ name, value }) => [name, value]));
+  const fromPage = await page.evaluate(() => ({
+    queueCards: document.querySelectorAll('[data-item-id]').length,
+    liveTimers: window.__ackwatchTimerCensus?.live,
+    createdTimers: window.__ackwatchTimerCensus?.created,
+  }));
+  const entry = {
+    at: new Date().toISOString(),
+    elapsedMs,
+    ...fromPage,
+    usedHeapBytes: byName.get('JSHeapUsedSize'),
+    listeners: byName.get('JSEventListeners'),
+    nodes: byName.get('Nodes'),
+    documents: byName.get('Documents'),
+    frames: byName.get('Frames'),
+    ...manifest.totals,
+  };
   appendFileSync(samplesPath, `${JSON.stringify(entry)}\n`);
   manifest.samples += 1;
   manifest.lastSample = entry;
   persist();
   return entry;
+}
+
+// `Acknowledge` is rendered only inside the item detail dialog (`src/app/App.tsx`, `.detail-actions`)
+// and never on a queue card, so acknowledging means opening an item the way an operator does. A
+// top-level lookup for the button silently matches nothing, which is how an earlier smoke run
+// completed 21 items and acknowledged none of them.
+async function acknowledgeOnePendingItem(page) {
+  const pending = page.locator(
+    '[data-item-id][data-status="NEW"], [data-item-id][data-status="UNACKNOWLEDGED"]',
+  );
+  if ((await pending.count()) === 0) return false;
+
+  await pending.first().getByRole('button', { name: 'View details' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.waitFor({ state: 'visible', timeout: 15_000 });
+
+  let acknowledged = false;
+  const acknowledge = dialog.getByRole('button', { name: 'Acknowledge' });
+  if (await acknowledge.isVisible().catch(() => false)) {
+    await acknowledge.click();
+    // The button is unrendered once the item leaves NEW/UNACKNOWLEDGED, so waiting for it to detach
+    // waits for the command to have been applied rather than merely dispatched.
+    await acknowledge.waitFor({ state: 'detached', timeout: 15_000 });
+    acknowledged = true;
+  }
+
+  await dialog.getByRole('button', { name: 'Close details' }).click();
+  await dialog.waitFor({ state: 'detached', timeout: 15_000 }).catch(() => undefined);
+  return acknowledged;
 }
 
 async function main() {
@@ -203,15 +277,67 @@ async function main() {
   });
   await waitFor('static server', async () => (await fetch(appUrl)).ok);
 
-  browser = await chromium.launch();
+  // Without this flag Chromium reports a bucketed, cached heap size, so a leak and a flat session
+  // are indistinguishable. It is a measurement flag only and changes nothing the app can observe.
+  browser = await chromium.launch({ args: ['--enable-precise-memory-info'] });
   const context = await browser.newContext();
+
+  // §8.2 asks whether timers duplicate, and nothing CDP reports answers that. Counting live handles
+  // in the page is the only way to see it. The wrappers preserve the platform contract exactly —
+  // same arguments, same returned handle — and are installed by this harness alone.
+  await context.addInitScript(() => {
+    const live = new Set();
+    const census = {
+      created: 0,
+      get live() {
+        return live.size;
+      },
+    };
+    for (const [set, clear, repeats] of [
+      ['setTimeout', 'clearTimeout', false],
+      ['setInterval', 'clearInterval', true],
+    ]) {
+      const schedule = window[set].bind(window);
+      const cancel = window[clear].bind(window);
+      window[set] = (handler, delay, ...rest) => {
+        census.created += 1;
+        let handle;
+        const callback =
+          typeof handler === 'function'
+            ? (...args) => {
+                if (!repeats) live.delete(handle);
+                return handler(...args);
+              }
+            : handler;
+        handle = schedule(callback, delay, ...rest);
+        live.add(handle);
+        return handle;
+      };
+      window[clear] = (handle) => {
+        live.delete(handle);
+        return cancel(handle);
+      };
+    }
+    Object.defineProperty(window, '__ackwatchTimerCensus', { value: census });
+  });
+
   const page = await context.newPage();
+  const cdp = await context.newCDPSession(page);
+  await cdp.send('Performance.enable');
   page.on('pageerror', (error) => {
-    manifest.browserErrors.push({ at: new Date().toISOString(), message: error.message });
+    manifest.pageErrors.push({
+      at: new Date().toISOString(),
+      name: error.name,
+      message: error.message,
+    });
   });
   page.on('console', (message) => {
     if (message.type() === 'error') {
-      manifest.browserErrors.push({ at: new Date().toISOString(), console: message.text() });
+      manifest.browserErrors.push({
+        at: new Date().toISOString(),
+        console: message.text(),
+        url: message.location().url,
+      });
     }
   });
 
@@ -240,7 +366,7 @@ async function main() {
   let nextReconnect = Date.now() + reconnectEveryMs;
   let counter = 0;
 
-  await sample(page, 0);
+  await sample(page, cdp, 0);
   const startedAt = Date.now();
 
   while (Date.now() < deadline) {
@@ -260,18 +386,25 @@ async function main() {
     }
 
     // Work the queue the way an operator would: acknowledge what arrived, complete some of it.
-    const cards = page.locator('[data-item-id]');
-    if ((await cards.count()) > 0) {
-      manifest.totals.accepted = await cards.count();
-      const acknowledge = page.getByRole('button', { name: 'Acknowledge' }).first();
-      if (await acknowledge.isVisible().catch(() => false)) {
-        await acknowledge.click().catch(() => undefined);
-        manifest.totals.acknowledged += 1;
-      }
+    manifest.totals.accepted = await page.locator('[data-item-id]').count();
+    if (await acknowledgeOnePendingItem(page)) {
+      manifest.totals.acknowledged += 1;
+      // Edge-triggered on the acknowledgement, not level-tested on the running total: this loop
+      // turns every second, so testing the total on each pass completes an item every second for
+      // as long as the count sits on a multiple of three — and completes on every pass while it
+      // is still zero, which is the defect this replaces.
       if (manifest.totals.acknowledged % 3 === 0) {
-        const complete = page.getByRole('button', { name: 'Complete' }).first();
-        if (await complete.isVisible().catch(() => false)) {
-          await complete.click().catch(() => undefined);
+        const complete = page.locator('[data-item-id]').getByRole('button', { name: 'Complete' });
+        if (
+          await complete
+            .first()
+            .isVisible()
+            .catch(() => false)
+        ) {
+          await complete
+            .first()
+            .click()
+            .catch(() => undefined);
           manifest.totals.completed += 1;
         }
       }
@@ -286,38 +419,146 @@ async function main() {
     }
 
     if (now >= nextSample) {
-      await sample(page, now - startedAt);
+      await sample(page, cdp, now - startedAt);
       nextSample = now + sampleIntervalMs;
     }
 
     await new Promise((r) => setTimeout(r, 1_000));
   }
 
-  const final = await sample(page, Date.now() - startedAt);
+  const final = await sample(page, cdp, Date.now() - startedAt);
   await page.screenshot({ path: resolve(artifactsDirectory, 'soak-final.png'), fullPage: true });
 
   const readings = readFileSync(samplesPath, 'utf8')
     .split('\n')
     .filter(Boolean)
     .map((line) => JSON.parse(line));
-  const heaps = readings
-    .map(({ usedHeapBytes }) => usedHeapBytes)
-    .filter((v) => typeof v === 'number');
-  manifest.heap = heaps.length
+
+  // A shift accumulates work on purpose: items stay in the queue, and completed ones stay in
+  // history until an explicit cleanup. So heap, listeners and DOM nodes are all *supposed* to grow
+  // roughly in step with the queue, and a raw ratio would fail an honest six-hour run on its own
+  // success — a thousand items cannot cost what seventeen do. What a leak looks like is cost per
+  // retained item rising, so those three are normalized by queue depth and it is the normalized
+  // figure that is judged. Timers and documents are per-application, not per-item, and are judged
+  // absolutely: nothing about working the queue should add either.
+  const baseline = readings.find(({ queueCards }) => queueCards >= 5) ?? readings[1] ?? readings[0];
+  const growth = (key, { perCard = false } = {}) => {
+    const from = baseline?.[key];
+    const to = final?.[key];
+    if (typeof from !== 'number' || typeof to !== 'number') return undefined;
+    const scale = (value, { queueCards }) => (perCard ? value / Math.max(queueCards, 1) : value);
+    const scaledFrom = scale(from, baseline);
+    const scaledTo = scale(to, final);
+    return {
+      from,
+      to,
+      ...(perCard
+        ? {
+            perCardFrom: Number(scaledFrom.toFixed(1)),
+            perCardTo: Number(scaledTo.toFixed(1)),
+            overCards: `${baseline.queueCards} → ${final.queueCards}`,
+          }
+        : {}),
+      ratio: Number((scaledTo / Math.max(scaledFrom, Number.EPSILON)).toFixed(2)),
+    };
+  };
+  manifest.growth = {
+    heap: growth('usedHeapBytes', { perCard: true }),
+    listeners: growth('listeners', { perCard: true }),
+    nodes: growth('nodes', { perCard: true }),
+    liveTimers: growth('liveTimers'),
+    documents: growth('documents'),
+  };
+  manifest.heap = manifest.growth.heap
     ? {
-        firstBytes: heaps[0],
-        lastBytes: heaps.at(-1),
-        peakBytes: Math.max(...heaps),
-        growthRatio: Number((heaps.at(-1) / Math.max(heaps[0], 1)).toFixed(2)),
+        firstBytes: manifest.growth.heap.from,
+        lastBytes: manifest.growth.heap.to,
+        peakBytes: Math.max(
+          ...readings.map(({ usedHeapBytes }) => usedHeapBytes).filter(Number.isFinite),
+        ),
+        growthRatio: manifest.growth.heap.ratio,
       }
-    : { note: 'The browser did not expose performance.memory.' };
+    : { note: 'Chromium did not report JSHeapUsedSize over CDP.' };
   manifest.finalQueueCards = final.queueCards;
-  manifest.result = 'pass';
+
+  const unexplained = manifest.browserErrors.filter(
+    (entry) =>
+      !expectedBrowserNoise.some((pattern) => pattern.test(`${entry.url ?? ''} ${entry.console}`)),
+  );
+  manifest.unexplainedBrowserErrors = unexplained;
+  manifest.expectedBrowserNoise = manifest.browserErrors.length - unexplained.length;
+
+  const check = (name, passed, detail, { advisory = false } = {}) =>
+    manifest.checks.push({
+      name,
+      status: passed ? 'pass' : 'fail',
+      ...(advisory && !passed ? { advisory: true } : {}),
+      detail,
+    });
+  // Nothing about a leak is visible in a three-minute run, so growth is recorded but not decisive
+  // there. Whether the run exercised the workflow at all is decisive at any length.
+  const trend = { advisory: smokeRun };
+  const ratioCheck = (name, measured, label) =>
+    check(
+      name,
+      measured === undefined || measured.ratio <= growthCeiling,
+      measured
+        ? `${label} went ${measured.from} → ${measured.to}` +
+            (measured.perCardTo === undefined
+              ? ''
+              : `, or ${measured.perCardFrom} → ${measured.perCardTo} per item over ${measured.overCards} items`) +
+            ` (${measured.ratio}×, ceiling ${growthCeiling}×).`
+        : `${label} was not reported by the browser.`,
+      trend,
+    );
+
+  check(
+    'workflowExercised',
+    manifest.totals.acknowledged > 0 && manifest.totals.completed > 0,
+    `${manifest.totals.acknowledged} acknowledged and ${manifest.totals.completed} completed of ${manifest.totals.sent} sent.`,
+  );
+  check(
+    'reconnected',
+    manifest.totals.reconnects > 0,
+    `${manifest.totals.reconnects} connection drops were injected and recovered.`,
+  );
+  check(
+    'noPageErrors',
+    manifest.pageErrors.length === 0,
+    `${manifest.pageErrors.length} uncaught page errors.`,
+  );
+  check(
+    'noUnexplainedConsoleErrors',
+    unexplained.length === 0,
+    `${unexplained.length} unexplained of ${manifest.browserErrors.length} console errors; ${manifest.expectedBrowserNoise} matched known rig noise.`,
+  );
+  ratioCheck('heapPerItemStable', manifest.growth.heap, 'Collected heap');
+  ratioCheck('listenersPerItemStable', manifest.growth.listeners, 'Live DOM event listeners');
+  ratioCheck('nodesPerItemStable', manifest.growth.nodes, 'DOM nodes');
+  ratioCheck('timersStable', manifest.growth.liveTimers, 'Live timers');
+  check(
+    'documentsStable',
+    manifest.growth.documents === undefined ||
+      manifest.growth.documents.to <= manifest.growth.documents.from,
+    manifest.growth.documents
+      ? `Documents went ${manifest.growth.documents.from} → ${manifest.growth.documents.to}.`
+      : 'Document count was not reported by the browser.',
+    trend,
+  );
+
+  const decisive = manifest.checks.filter(({ status, advisory }) => status === 'fail' && !advisory);
+  manifest.result = decisive.length === 0 ? 'pass' : 'fail';
   manifest.endedAt = new Date().toISOString();
   persist();
+  if (decisive.length > 0) {
+    throw new Error(
+      `Soak checks failed: ${decisive.map(({ name, detail }) => `${name} — ${detail}`).join('; ')}`,
+    );
+  }
   process.stdout.write(
     `Soak finished: ${manifest.totals.sent} sent, ${manifest.totals.acknowledged} acknowledged, ` +
-      `${manifest.totals.reconnects} reconnects, ${manifest.samples} samples.\n`,
+      `${manifest.totals.completed} completed, ${manifest.totals.reconnects} reconnects, ` +
+      `${manifest.samples} samples, ${manifest.checks.length} checks.\n`,
   );
 }
 

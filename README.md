@@ -55,10 +55,13 @@ npm run audit:dependencies
 npm run report:licenses
 ```
 
-`npm run check:gate4` runs the complete Phase 4 sequence. It needs Docker for the disposable Synapse
-and ntfy stacks, and it records each step as it passes so the generated report reflects what actually
-ran. Generated reports, screenshots, traces, and the HTML gallery are written beneath ignored
-`artifacts/`.
+`npm run check:gate4` runs the complete Phase 4 sequence and `npm run check:gate5` the V1 release
+matrix. Both need Docker for the disposable Synapse and ntfy stacks, and both record each step as it
+passes so the generated report reflects what actually ran. Generated reports, screenshots, traces,
+and the HTML gallery are written beneath ignored `artifacts/`.
+
+`npm run test:soak` is the longevity run and is scheduled separately: it holds the machine and
+Docker for six hours by default. Gate 5 reads its recorded manifest rather than re-running it.
 
 See [Deployment](./docs/DEPLOYMENT.md) for the Content Security Policy and hosting notes, plus
 [Testing](./docs/TESTING.md), [Architecture](./docs/ARCHITECTURE.md), and the

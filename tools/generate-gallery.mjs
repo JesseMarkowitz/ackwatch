@@ -1,22 +1,14 @@
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+
+import { worktreeIdentifier as identifyWorktree } from './worktree-identifier.mjs';
 
 const screenshotDirectory = join('artifacts', 'screenshots');
 const reportDirectory = join('artifacts', 'gallery');
 const images = readdirSync(screenshotDirectory)
   .filter((file) => file.endsWith('.png'))
   .sort();
-let worktreeIdentifier = 'uncommitted-worktree';
-
-try {
-  worktreeIdentifier = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  }).trim();
-} catch {
-  // The approved foundation starts before the human creates the first commit.
-}
+const worktreeIdentifier = identifyWorktree();
 
 mkdirSync(reportDirectory, { recursive: true });
 

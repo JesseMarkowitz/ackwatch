@@ -27,13 +27,47 @@
 - `npm run check:gate2`: the complete Phase 2 gate and evidence report.
 - `npm run check:gate3`: the complete Phase 3 workflow gate, including native IndexedDB,
   deterministic queue visuals, and the expanded real-Matrix workflow.
+- `npm run test:soak`: the §8.2 longevity run. It boots a disposable Synapse, drives the real UI for
+  `ACKWATCH_SOAK_MINUTES` (360 by default), produces messages at a human cadence, works the queue as
+  an operator would, drops and restores the connection, and samples to
+  `artifacts/soak/soak-samples.jsonl` as it goes so an interrupted run still leaves what it
+  measured. Set a few minutes to smoke-test the harness; a run under an hour is marked `smokeRun`
+  and its growth checks become advisory, because three minutes cannot establish a shift-length
+  trend.
 - `npm run check:gate4`: the Phase 4 reliability gate, including E2EE, recovery/SAS, complete event
   semantics, local receiver contracts, self-hosted ntfy, alert faults, and Phase 4 visuals.
+- `npm run check:gate5`: the V1 release matrix — the Gate 4 sequence plus `test:scale`, ending in
+  the Gate 5 report.
 
-Steps in the Gate 4 chain that leave no artifact of their own record a marker under
-`artifacts/reports/steps/` as they pass, and the chain clears those markers before it starts. The
-Gate 4 report reads them rather than asserting that a step it never observed succeeded, so it
+Steps in the gate chains that leave no artifact of their own record a marker under
+`artifacts/reports/steps/` as they pass, and a chain clears those markers before it starts. The gate
+reports read them rather than asserting that a step they never observed succeeded, so a report
 cannot be generated from a partial run.
+
+The six-hour soak and the advisory WebKit run are deliberately outside the Gate 5 chain: the soak
+occupies the machine and Docker for a shift and is scheduled by the developer, and WebKit cannot run
+on a host without its system libraries. The Gate 5 report verifies their recorded manifests instead,
+refuses a smoke-length soak as longevity evidence, and records anything absent as an explained skip
+with the gate reporting `incomplete` rather than `pass`. A step that did not run never passes as
+silence.
+
+### What the soak measures
+
+`performance.memory` is not used: Chromium buckets and caches it, so it reports the same figure all
+run and a leak is indistinguishable from a flat session. Heap comes from CDP after a forced
+collection, alongside live DOM listener, node, document and frame counts and a live-timer census
+installed in the page.
+
+Heap, listeners and DOM nodes are judged **per queue item**, not in absolute terms. A shift
+accumulates work on purpose — items stay in the queue and completed ones stay in history until an
+explicit cleanup — so those three are supposed to grow with the queue, and an absolute ratio would
+fail an honest run on its own success. A leak looks like cost per retained item rising. Timers and
+documents are per-application rather than per-item and are judged absolutely: working the queue
+should add neither.
+
+The run records explicit checks and fails on any decisive one, rather than reporting `pass` for
+having reached the end. Console noise is classified against named patterns, the same discipline the
+gate reports apply to the Matrix run; anything unmatched fails the soak.
 
 WebKit additionally needs system libraries that Playwright installs with `sudo`; on a machine
 without them the advisory project cannot run at all, which is a limitation of the machine and is
