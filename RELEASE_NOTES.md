@@ -44,10 +44,13 @@ These are properties of the product, not defects awaiting a fix.
   notification, never room labels, senders, previews, attachment names, Matrix URIs, or tokens. If
   you want to know _what_ needs attention, you open AckWatch. This is not configurable, because a
   webhook leaves the machine.
-- **Supported browsers are current desktop Chromium and Firefox.** Those are the engines the
-  qualification suite runs against. WebKit is exercised advisory-only through Playwright, which
-  **is not real Safari** — it is a different build with different behaviour, and passing there is
-  not evidence that AckWatch works in Safari. Safari is not a supported browser in V1.
+- **Supported browsers are current desktop Chromium and Firefox.** Those are the only engines the
+  qualification suite runs against. **Safari is not supported in V1 and is not tested.** Playwright
+  offers a WebKit build, but it **is not real Safari** — it exercises WebCore on Linux, while the
+  behaviours most likely to affect a local-first application in Safari are platform policies it
+  cannot reproduce, above all Intelligent Tracking Prevention deleting a site's IndexedDB after
+  seven days of disuse. Since AckWatch keeps everything in IndexedDB, treat Safari as untested
+  rather than working.
 - **The Content Security Policy is a template you complete.** AckWatch ships the strict policy it
   actually runs under, with `connect-src` left for the deployer to fill in with their homeserver and
   webhook origins. Those origins are not known at build time, and widening the directive to `https:`

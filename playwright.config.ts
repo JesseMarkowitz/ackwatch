@@ -18,8 +18,10 @@ export default defineConfig({
   projects: [
     { name: 'chromium', use: { browserName: 'chromium' } },
     { name: 'firefox', use: { browserName: 'firefox' } },
-    // Advisory only, and never part of a gate: WebKit through Playwright is not Safari, and this
-    // project is not run unless `npm run setup:browsers:webkit` has installed it.
+    // Out of scope for V1 and not run (§8.3a, amended 2026-09-03): WebKit through Playwright is
+    // not Safari, and the Safari behaviours that would matter here are platform policies it cannot
+    // reproduce. Kept wired so a later release can opt in via `npm run test:browser:webkit`, which
+    // writes its own results file rather than overwriting the required engines' evidence.
     { name: 'webkit', use: { browserName: 'webkit' } },
   ],
   webServer: {

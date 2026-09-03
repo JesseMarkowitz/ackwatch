@@ -15,9 +15,12 @@
   uses those accounts and never deactivates them, because they are someone's real accounts. The
   manifest records which registration stage the homeserver asked for, so a server that accepts
   registration without a token is visible in the evidence rather than assumed.
-- `npm run test:browser:webkit`: advisory only, never part of a gate. Install it first with
-  `npm run setup:browsers:webkit`. WebKit through Playwright is not Safari and must not be described
-  as Safari support.
+- `npm run test:browser:webkit`: **out of scope for V1 and not run** (§8.3a, amended 2026-09-03).
+  The project stays wired so a later release can opt in: install it with
+  `npm run setup:browsers:webkit`, then the 117 host packages with
+  `sudo ./node_modules/.bin/playwright install-deps webkit`. It writes its own results file so an
+  opt-in run can never overwrite the required Chromium and Firefox evidence. WebKit through
+  Playwright is not Safari and must not be described as Safari support.
 - `npm run test:webhook:local`: pinned self-hosted ntfy contract and redacted manifest.
 - `npm run test:scale`: drives the real repository against real IndexedDB in Chromium at ten
   thousand activities, publishing a growth curve to `artifacts/reports/scale-summary.json`. The
@@ -44,12 +47,20 @@ Steps in the gate chains that leave no artifact of their own record a marker und
 reports read them rather than asserting that a step they never observed succeeded, so a report
 cannot be generated from a partial run.
 
-The six-hour soak and the advisory WebKit run are deliberately outside the Gate 5 chain: the soak
-occupies the machine and Docker for a shift and is scheduled by the developer, and WebKit cannot run
-on a host without its system libraries. The Gate 5 report verifies their recorded manifests instead,
-refuses a smoke-length soak as longevity evidence, and records anything absent as an explained skip
-with the gate reporting `incomplete` rather than `pass`. A step that did not run never passes as
-silence.
+The six-hour soak is deliberately outside the Gate 5 chain: it occupies the machine and Docker for
+a shift and is scheduled by the developer. The Gate 5 report verifies its recorded manifest instead
+and refuses a smoke-length run as longevity evidence. Anything absent is recorded as an explained
+skip with the gate reporting `incomplete` rather than `pass` — a step that did not run never passes
+as silence.
+
+WebKit is the one exception, and it is an exception because it is a decision rather than a gap. The
+report records it as out of scope with the reasoning attached, so it does not hold the gate open. If
+that decision is ever reversed, delete the `out-of-scope` branch in `tools/generate-gate5-report.mjs`
+and the absence becomes an explained skip again.
+
+WebKit additionally needs 117 system libraries that Playwright installs with `sudo`. That cost,
+against a run that could neither license a Safari support claim nor disprove one, is why V1 does not
+qualify WebKit; see §8.3a of the implementation plan for the full reasoning.
 
 ### What the soak measures
 
@@ -68,10 +79,6 @@ should add neither.
 The run records explicit checks and fails on any decisive one, rather than reporting `pass` for
 having reached the end. Console noise is classified against named patterns, the same discipline the
 gate reports apply to the Matrix run; anything unmatched fails the soak.
-
-WebKit additionally needs system libraries that Playwright installs with `sudo`; on a machine
-without them the advisory project cannot run at all, which is a limitation of the machine and is
-recorded rather than worked around.
 
 Run `npm run setup:browsers` once after installation to place the pinned Chromium and Firefox
 binaries in the ignored project cache.

@@ -30,6 +30,7 @@ function recordedStep(name) {
 // §8.4 requires a full report with no unexplained skips. A step may be absent only if this file
 // names the reason, so "it did not run" can never pass review as silence.
 const skips = [];
+const plural = (count, noun) => `${count} ${noun}${count === 1 ? '' : 's'}`;
 function skipped(reason) {
   skips.push(reason);
   return { status: 'skipped', reason };
@@ -47,8 +48,9 @@ const licenses = readJson('artifacts/reports/dependency-licenses.json');
 // The soak occupies the machine for six hours and is scheduled separately (§8.3a), so the gate
 // verifies its recorded manifest rather than re-running it inside the chain.
 const soak = readJsonIfPresent('artifacts/soak/soak-manifest.json');
-// WebKit is advisory: it is not Safari, its system libraries need root here, and it writes its own
-// results file so an advisory run can never overwrite the required Chromium and Firefox evidence.
+// WebKit is out of scope for V1 and normally absent. Read anyway, so a release that opts back in
+// is reported rather than ignored; it writes its own results file, so an opt-in run can never
+// overwrite the required Chromium and Firefox evidence.
 const webkit = readJsonIfPresent('artifacts/reports/webkit-results.json');
 
 const screenshots = readdirSync('artifacts/screenshots').filter((file) => file.endsWith('.png'));
@@ -157,16 +159,21 @@ if (!soak) {
   };
 }
 
+// Out of scope for V1 by recorded decision (§8.3a, amended 2026-09-03), not a step still owed. The
+// project remains wired so a later release can opt in, and a run that happens anyway is reported —
+// but its absence is a decision the gate records, never a skip the gate holds open.
 const webkitCheck = webkit
   ? {
       status: webkit.stats.unexpected === 0 ? 'pass' : 'fail',
       advisory: true,
       tests: webkit.stats.expected,
-      note: 'Advisory only. WebKit through Playwright is not Safari and is not released as Safari support.',
+      note: 'Advisory only, and outside the V1 scope. WebKit through Playwright is not Safari and is not released as Safari support.',
     }
-  : skipped(
-      'WebKit is advisory and was not run: its Playwright build needs host system libraries that install with root. Chromium and Firefox are the required engines; WebKit is not released as Safari support either way.',
-    );
+  : {
+      status: 'out-of-scope',
+      decision:
+        'WebKit is not qualified for V1. Playwright WebKit on Linux exercises WebCore, not Safari, and the failures most likely to matter to a local-first app in real Safari — ITP evicting IndexedDB after seven days, notification permission requiring a user gesture, iOS home-screen behaviour — are platform policies it cannot reproduce. It could neither license a Safari support claim nor disprove one, so its 117 host packages buy no decision. Chromium and Firefox are the supported engines and Safari is documented as unsupported.',
+    };
 
 const remoteCheck =
   remoteMatrix.result === 'pass'
@@ -282,11 +289,15 @@ Toolchain: ${report.versions.node}, ${report.versions.npm}
 - ${browser.stats.expected} system and accessibility tests passed in Chromium and Firefox under the production CSP.
 - ${visual.stats.expected} visual scenarios passed; the gallery is rendered from ${gallery.worktreeIdentifier}.
 - Scale at ${scale.target.activities} activities / ${scale.target.items} items: ${ms(scale.commandMs)} ms command, ${ms(scale.schedulerMs)} ms scheduler pass, ${ms(scale.samples.at(-1).perEventMs)} ms per event.${perEventDeviation ? ' Per-event cost is a recorded accepted deviation at this ceiling.' : ''}
-- Longevity: ${soakCheck.status === 'pass' ? `${soak.plannedMinutes}-minute soak passed with ${soak.totals.acknowledged} acknowledged and ${soak.totals.completed} completed across ${soak.totals.reconnects} reconnects.` : soakCheck.reason}
+- Longevity: ${soakCheck.status === 'pass' ? `${soak.plannedMinutes}-minute soak passed with ${soak.totals.acknowledged} acknowledged and ${soak.totals.completed} completed across ${plural(soak.totals.reconnects, 'reconnect')}.` : soakCheck.reason}
 - The disposable Matrix run passed ${localMatrix.assertions.length} assertions; the self-hosted ntfy run passed ${webhook.assertions.length}.
-${skips.length === 0 ? '\nEvery step has evidence. Release remains gated on human review and explicit authorization.\n' : `\n## Explained skips\n\n${skips.map((reason) => `- ${reason}`).join('\n')}\n\nThis gate is incomplete until each is resolved or accepted in writing.\n`}`,
+${
+  webkitCheck.status === 'out-of-scope'
+    ? `\n## Out of scope by decision\n\n- **WebKit / Safari.** ${webkitCheck.decision}\n`
+    : ''
+}${skips.length === 0 ? '\nEvery step in scope has evidence. Release remains gated on human review and explicit authorization.\n' : `\n## Explained skips\n\n${skips.map((reason) => `- ${reason}`).join('\n')}\n\nThis gate is incomplete until each is resolved or accepted in writing.\n`}`,
 );
 
 process.stdout.write(
-  `Generated machine-readable and human Gate 5 reports: ${result}${skips.length > 0 ? ` (${skips.length} explained skips)` : ''}.\n`,
+  `Generated machine-readable and human Gate 5 reports: ${result}${skips.length > 0 ? ` (${plural(skips.length, 'explained skip')})` : ''}.\n`,
 );
