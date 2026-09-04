@@ -297,6 +297,25 @@ export function defaultAccountSettings(accountId: string, now: number): AccountS
 export class WorkflowRepository {
   private readonly database: WorkflowDatabase;
   private intentionallyClosing = false;
+  /**
+   * Parsed queue items, reused when the stored row has not changed.
+   *
+   * `uiProjection` runs after every ingested event and every command, and it used to re-validate
+   * every row through zod on each call. That cost grows with the queue rather than with what
+   * changed, and it also handed React a brand-new object for every item every time, so no amount
+   * of memoization in the UI could ever skip an unchanged card.
+   *
+   * Reuse is keyed on the serialized row rather than on `updatedAt`. Every mutation in
+   * `domain/queue.ts` does bump `updatedAt` today, but nothing enforces that, and an item whose
+   * displayed state silently lags its stored state is a worse failure for an attention monitor
+   * than a slow one. Comparing the row itself means a missed reuse costs a parse and nothing else:
+   * the cache can never serve content that differs from what is stored.
+   */
+  private itemCache = new Map<
+    string,
+    { readonly serialized: string; readonly parsed: QueueItem }
+  >();
+  private itemCacheAccountId: string | undefined;
 
   public constructor(
     databaseName = 'ackwatch-workflow',
@@ -1108,12 +1127,36 @@ export class WorkflowRepository {
         .toArray(),
       this.database.quarantine.where('accountId').equals(accountId).count(),
     ]);
-    const items: QueueItem[] = [];
-    for (const raw of rawItems) {
-      const parsed = queueItemSchema.safeParse(raw);
-      if (parsed.success) items.push(parsed.data);
-      else await this.quarantineItem(accountId, raw, parsed.error.message);
+    // The cache belongs to one account; a different one starts clean rather than sharing entries.
+    if (this.itemCacheAccountId !== accountId) {
+      this.itemCache = new Map();
+      this.itemCacheAccountId = accountId;
     }
+    const items: QueueItem[] = [];
+    const seen = new Set<string>();
+    for (const raw of rawItems) {
+      const key = typeof raw.id === 'string' ? raw.id : undefined;
+      const serialized = key === undefined ? undefined : JSON.stringify(raw);
+      if (key !== undefined) seen.add(key);
+      const cached = key === undefined ? undefined : this.itemCache.get(key);
+      if (cached !== undefined && cached.serialized === serialized) {
+        items.push(cached.parsed);
+        continue;
+      }
+      const parsed = queueItemSchema.safeParse(raw);
+      if (parsed.success) {
+        items.push(parsed.data);
+        if (key !== undefined && serialized !== undefined) {
+          this.itemCache.set(key, { serialized, parsed: parsed.data });
+        }
+      } else {
+        if (key !== undefined) this.itemCache.delete(key);
+        await this.quarantineItem(accountId, raw, parsed.error.message);
+      }
+    }
+    // Items deleted from the store — a thread merge absorbing one, a session ending — must not sit
+    // in the cache for the life of the page.
+    for (const key of this.itemCache.keys()) if (!seen.has(key)) this.itemCache.delete(key);
     return {
       items: items.sort(compareQueueItems),
       exhaustedDeliveries: rawDeliveries.map((value) => deliverySchema.parse(value)),
@@ -1322,6 +1365,8 @@ export class WorkflowRepository {
 
   public close(): void {
     this.intentionallyClosing = true;
+    this.itemCache = new Map();
+    this.itemCacheAccountId = undefined;
     this.database.close();
   }
 

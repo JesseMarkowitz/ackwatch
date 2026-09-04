@@ -342,11 +342,14 @@ export class ScaleBenchmark {
    * ingested event and every command, and it is the half of per-event latency that `commandMs`
    * misses: that measurement stops at the projection query, before React runs.
    *
-   * The re-render deliberately hands React all-new item objects with one item's content changed.
-   * That is exactly what the app does today — `uiProjection` re-parses every row through zod, so
-   * every object has fresh identity even when its values did not change. Measuring the cheaper
-   * case of stable identities would describe an application that does not exist, and would make
-   * `React.memo` look effective when nothing in the current code would let it hit.
+   * The re-render mirrors what `uiProjection` now returns: the changed item is a new object and
+   * every untouched item keeps the identity it already had, because the repository caches parsed
+   * items and reuses them while the stored row is byte-identical.
+   *
+   * This assumption is load-bearing and was wrong once. The measurement originally cloned every
+   * item, which was accurate before the cache existed and became a benchmark of a path the app no
+   * longer takes the moment it landed — making memoization look like a regression by guaranteeing
+   * every comparison missed. If the projection ever stops preserving identity, change this back.
    */
   private measureRender(items: readonly QueueItem[]): {
     mountMs: number;
@@ -385,7 +388,7 @@ export class ScaleBenchmark {
               unseenActivityCount: item.unseenActivityCount + 1,
               updatedAt: item.updatedAt + 1,
             }
-          : { ...item },
+          : item,
       );
       const started = now();
       render(next);

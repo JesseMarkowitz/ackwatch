@@ -653,6 +653,45 @@ describe('denormalized latest activity', () => {
   });
 });
 
+describe('ui projection identity cache', () => {
+  it('reuses unchanged items, replaces changed ones, and drops removed ones', async () => {
+    const repository = await createRepository();
+    await repository.acceptActivity(activity('$one'));
+    await repository.acceptActivity(
+      activity('$two', { roomId: '!other:example.test', detectedAt: 2_000 }),
+    );
+
+    const first = await repository.uiProjection(accountId);
+    const second = await repository.uiProjection(accountId);
+    expect(first.items).toHaveLength(2);
+
+    // Identity is what lets the UI skip a card that did not change. Equality is not enough:
+    // React compares by reference, so a fresh object for an untouched item defeats memoization.
+    for (const [index, item] of second.items.entries()) {
+      expect(item).toBe(first.items[index]);
+    }
+
+    // A changed row must never be served from the cache. A card that lags the stored state is a
+    // worse failure for an attention monitor than a slow one.
+    const changed = first.items[0];
+    if (!changed) throw new Error('expected a seeded item');
+    await repository.applyCommand(accountId, changed.id, { kind: 'mark_viewed', at: 3_000 });
+
+    const third = await repository.uiProjection(accountId);
+    const refreshed = third.items.find(({ id }) => id === changed.id);
+    expect(refreshed).not.toBe(changed);
+    expect(refreshed?.status).toBe('UNACKNOWLEDGED');
+    // The item that was not touched keeps its identity across the same read.
+    const untouched = third.items.find(({ id }) => id !== changed.id);
+    expect(untouched).toBe(first.items.find(({ id }) => id !== changed.id));
+
+    // A row that leaves the store must not sit in the cache for the life of the page.
+    await repository.unsafeDatabaseForTests().queueItems.delete(changed.id);
+    const fourth = await repository.uiProjection(accountId);
+    expect(fourth.items.map(({ id }) => id)).not.toContain(changed.id);
+  });
+});
+
 describe('diagnostics and cleanup', () => {
   it('describes behaviour without carrying content, identifiers or destinations', async () => {
     const repository = await createRepository();

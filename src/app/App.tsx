@@ -1,4 +1,13 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import {
+  type FormEvent,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 
 import type { AckWatchControllerPort, AppSnapshot } from '../application/app-controller';
 import type { FoundationViewModel } from './view-model';
@@ -603,7 +612,7 @@ function deadlineLabel(item: QueueItem): string {
   return `${item.deadline.kind === 'acknowledged' ? 'Pending-work' : 'Unacknowledged'} deadline ${new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(item.deadline.firstAt)}`;
 }
 
-function QueueCard({
+const QueueCard = memo(function QueueCard({
   item,
   controller,
   openDetails,
@@ -667,7 +676,7 @@ function QueueCard({
       </div>
     </article>
   );
-}
+});
 
 function QueueSection({
   title,
@@ -966,11 +975,17 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
     (item) => item.status !== 'COMPLETED' && !item.needsAttention,
   );
   const completedItems = snapshot.queueItems.filter((item) => item.status === 'COMPLETED');
-  const openDetails = (itemId: string) => {
-    const item = snapshot.queueItems.find(({ id }) => id === itemId);
-    setSelectedItemId(itemId);
-    if (item?.status === 'NEW') void controller?.applyQueueCommand(itemId, 'mark_viewed');
-  };
+  // Stable across renders, so a memoized card is not re-rendered by a fresh callback identity.
+  // It reads the queue through the controller rather than closing over `snapshot`, because a
+  // callback that captured the snapshot would either go stale or change identity every render.
+  const openDetails = useCallback(
+    (itemId: string) => {
+      setSelectedItemId(itemId);
+      const item = controller?.getSnapshot?.().queueItems.find(({ id }) => id === itemId);
+      if (item?.status === 'NEW') void controller?.applyQueueCommand(itemId, 'mark_viewed');
+    },
+    [controller],
+  );
 
   return (
     <div className="app-shell">
