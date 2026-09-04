@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 
+import { recordedStep } from './recorded-step.mjs';
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
@@ -100,8 +102,8 @@ const report = {
     synapse: localMatrix.homeserver.version,
   },
   checks: {
-    fastChecks: 'pass',
-    productionBuild: 'pass',
+    fastChecks: recordedStep('fastChecks', 2),
+    productionBuild: recordedStep('productionBuild', 2),
     unitAndComponent: { status: 'pass', tests: unit.numPassedTests },
     browserSmoke: {
       status: 'pass',
@@ -115,9 +117,9 @@ const report = {
       cleanup: localMatrix.cleanup,
     },
     remoteMatrix: { status: remoteMatrix.result, reason: remoteMatrix.reason },
-    secretScan: 'pass',
-    trackedFileAudit: 'pass',
-    dependencyAudit: 'pass',
+    secretScan: recordedStep('secretScan', 2),
+    trackedFileAudit: recordedStep('trackedFileAudit', 2),
+    dependencyAudit: recordedStep('dependencyAudit', 2),
     licenses: {
       status: 'pass',
       packages: licenses.dependencies.length,

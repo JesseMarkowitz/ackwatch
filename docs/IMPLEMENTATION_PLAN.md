@@ -377,8 +377,9 @@ These were decided by the developer during Phase 5 and are normative for the rem
 Everything else in Phase 5 is delivered and green under `npm run check:gate4`. What remains:
 
 1. **The six-hour soak run**, scheduled by the developer because it occupies the machine and Docker for the duration. `npm run test:soak`, with `ACKWATCH_SOAK_MINUTES` defaulting to 360. The harness defects that would have made that run worthless are fixed (see §8.3c); it has not been re-smoke-tested since, so run it at three minutes once before committing six hours to it.
-2. **The test homeserver accepts registration without a token.** The remote homeserver advertises only `m.login.dummy`, so `enable_registration` is on but `registration_requires_token` is not — anyone can create an account. The remote controller negotiates whichever stage is offered and records `registrationTokenRequired` in its manifest, so this is visible in evidence, but the server should be tightened or the token withdrawn once remote qualification is finished.
-3. **Gates 1–3 still hardcode their step verdicts.** Only the Gate 4 and Gate 5 reports derive them from recorded markers. Retrofitting accepted gates is a developer decision.
+2. **Gates 1–3 still hardcode their step verdicts.** Only the Gate 4 and Gate 5 reports derive them from recorded markers. Retrofitting accepted gates is a developer decision.
+
+**Deferred 2026-09-03 to end-of-project cleanup: the test homeserver's open registration.** The remote homeserver advertises only `m.login.dummy`, so `enable_registration` is on but `registration_requires_token` is not, and anyone can create an account. The developer is still testing against it and is keeping it open deliberately. The remote controller records `registrationTokenRequired` in its manifest, so the state stays visible in the evidence rather than assumed. At project close the homeserver is to be **cleaned out entirely**, not merely tightened.
 
 **Declined 2026-09-03: the advisory WebKit run.** WebKit is out of scope for V1; the reasoning is recorded in §8.3a under the amended browser-matrix decision. Its absence is a decision the Gate 5 report records, not a skip it holds open, so the gate can reach `pass`. The Playwright project and `npm run test:browser:webkit` remain wired for a later release that decides otherwise.
 

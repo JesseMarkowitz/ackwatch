@@ -1,20 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 
+import { recordedStep } from './recorded-step.mjs';
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
-}
-
-// Steps that leave no artifact of their own record a marker as they pass. Reading the marker
-// keeps the report from asserting a result it never observed.
-function recordedStep(name) {
-  try {
-    return readJson(`artifacts/reports/steps/${name}.json`).status;
-  } catch {
-    throw new Error(
-      `The ${name} step left no recorded result. Run the complete "npm run check:gate4" chain.`,
-    );
-  }
 }
 
 const unit = readJson('artifacts/reports/unit-results.json');
@@ -137,8 +127,8 @@ const report = {
     ntfy: webhook.version,
   },
   checks: {
-    fastChecks: recordedStep('fastChecks'),
-    productionBuild: recordedStep('productionBuild'),
+    fastChecks: recordedStep('fastChecks', 4),
+    productionBuild: recordedStep('productionBuild', 4),
     unitAndComponent: { status: 'pass', tests: unit.numPassedTests, skipped: unit.numPendingTests },
     browsers: { status: 'pass', tests: browser.stats.expected, engines: ['chromium', 'firefox'] },
     visualCatalog: { status: 'pass', screenshots: visual.stats.expected },
@@ -151,9 +141,9 @@ const report = {
     },
     localWebhook: { status: webhook.result, assertions: webhook.assertions },
     remoteMatrix: { status: remoteMatrix.result, reason: remoteMatrix.reason },
-    secretScan: recordedStep('secretScan'),
-    trackedFileAudit: recordedStep('trackedFileAudit'),
-    dependencyAudit: recordedStep('dependencyAudit'),
+    secretScan: recordedStep('secretScan', 4),
+    trackedFileAudit: recordedStep('trackedFileAudit', 4),
+    dependencyAudit: recordedStep('dependencyAudit', 4),
     licenses: {
       status: 'pass',
       packages: licenses.dependencies.length,

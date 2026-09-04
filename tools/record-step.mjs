@@ -15,12 +15,10 @@ if (name === '--reset') {
   // The generated summaries are removed with the markers. A gate report left on disk from an
   // earlier run reads as current to anyone inspecting it after a failed chain, which is how a
   // stale "pass" gets believed; the file may only exist when this chain reaches its end.
-  for (const stale of [
-    'gate4-summary.json',
-    'gate4-summary.md',
-    'gate5-summary.json',
-    'gate5-summary.md',
-  ]) {
+  for (const stale of [1, 2, 3, 4, 5].flatMap((gate) => [
+    `gate${gate}-summary.json`,
+    `gate${gate}-summary.md`,
+  ])) {
     rmSync(`artifacts/reports/${stale}`, { force: true });
   }
   process.stdout.write('Cleared recorded release-chain steps and stale gate summaries.\n');

@@ -1,10 +1,14 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 
+import { recordedStep } from './recorded-step.mjs';
+
 const packageManifest = JSON.parse(readFileSync('package.json', 'utf8'));
 const licenseReport = JSON.parse(
   readFileSync('artifacts/reports/dependency-licenses.json', 'utf8'),
 );
+const unit = JSON.parse(readFileSync('artifacts/reports/unit-results.json', 'utf8'));
+const browser = JSON.parse(readFileSync('artifacts/reports/browser-results.json', 'utf8'));
 const screenshots = readdirSync('artifacts/screenshots')
   .filter((file) => file.endsWith('.png'))
   .sort();
@@ -17,6 +21,9 @@ const playwrightVersion = execFileSync(
   ['node_modules/@playwright/test/cli.js', '--version'],
   { encoding: 'utf8' },
 ).trim();
+
+if (!unit.success || unit.numFailedTests !== 0) throw new Error('Unit evidence is not passing.');
+if (browser.stats.unexpected !== 0) throw new Error('Browser evidence is not passing.');
 
 const report = {
   gate: 1,
@@ -31,17 +38,18 @@ const report = {
     browsers: browserDirectories,
   },
   checks: {
-    format: 'pass',
-    lint: 'pass',
-    strictTypecheck: 'pass',
-    unitAndComponent: { status: 'pass', tests: 3 },
-    productionBuild: 'pass',
-    productionRootAndSubpath: 'pass',
-    browserSmoke: { status: 'pass', tests: 4, engines: ['chromium', 'firefox'] },
+    fastChecks: recordedStep('fastChecks', 1),
+    unitAndComponent: { status: 'pass', tests: unit.numPassedTests },
+    productionBuild: recordedStep('productionBuild', 1),
+    browserSmoke: {
+      status: 'pass',
+      tests: browser.stats.expected,
+      engines: ['chromium', 'firefox'],
+    },
     visualCatalog: { status: 'pass', screenshots: screenshots.length },
-    secretScan: 'pass',
-    trackedFileAudit: 'pass',
-    dependencyAudit: 'pass',
+    secretScan: recordedStep('secretScan', 1),
+    trackedFileAudit: recordedStep('trackedFileAudit', 1),
+    dependencyAudit: recordedStep('dependencyAudit', 1),
     licenses: {
       status: 'pass',
       packages: licenseReport.dependencies.length,

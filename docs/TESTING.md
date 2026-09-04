@@ -77,8 +77,18 @@ documents are per-application rather than per-item and are judged absolutely: wo
 should add neither.
 
 The run records explicit checks and fails on any decisive one, rather than reporting `pass` for
-having reached the end. Console noise is classified against named patterns, the same discipline the
-gate reports apply to the Matrix run; anything unmatched fails the soak.
+having reached the end.
+
+Console errors are recorded verbatim and classified by the **Gate 5 report**, not by the controller —
+the same rule this file states for the Matrix run, and for a stronger reason: a stored manifest can
+be re-judged, whereas a controller that judges at run time makes every misclassification cost
+another six hours. The controller originally got this wrong, and one misjudged line failed a
+completed run that was healthy in every other respect. One rule is bounded rather than absolute: a
+handful of 401s on `/sync` is the refresh-token handshake, since the app logs in with
+`refresh_token: true` and Synapse's refreshable tokens are short-lived, so the first expiry surfaces
+as a 401 on the in-flight long-poll before the SDK refreshes. Beyond that bound they stay
+unexplained and fail the gate, and `workflowExercised` is the backstop either way — a session that
+never recovered would acknowledge nothing.
 
 Run `npm run setup:browsers` once after installation to place the pinned Chromium and Firefox
 binaries in the ignored project cache.

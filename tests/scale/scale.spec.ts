@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 
 import { expect, test } from '@playwright/test';
 
@@ -117,6 +117,28 @@ test('measures workflow behaviour as the store grows', async ({ page }) => {
         `command ${report.commandMs.toFixed(1)}ms  scheduler ${report.schedulerMs.toFixed(1)}ms  ` +
         `migration ${report.migrationMs.toFixed(1)}ms\n`,
     );
+  }
+
+  // One line per completed run. Per-ingested-event cost at the ceiling is not a stable figure:
+  // repeated runs of the same ladder have spanned 37-64 ms against a 50 ms target. A report that
+  // quotes whichever run it last read presents a coin flip as a measurement, so the history is kept
+  // and the Gate 5 report characterises the spread instead.
+  if (progress.report) {
+    const run = progress.report;
+    const ceiling = run.samples.at(-1);
+    if (ceiling) {
+      appendFileSync(
+        'artifacts/reports/scale-history.jsonl',
+        `${JSON.stringify({
+          at: run.generatedAt,
+          target: run.target,
+          perEventMs: Number(ceiling.perEventMs.toFixed(1)),
+          commandMs: Number(run.commandMs.toFixed(1)),
+          schedulerMs: Number(run.schedulerMs.toFixed(1)),
+          renderMs: Number(run.renderMs.toFixed(1)),
+        })}\n`,
+      );
+    }
   }
 
   expect(progress.error, `benchmark error: ${progress.error ?? ''}`).toBeUndefined();

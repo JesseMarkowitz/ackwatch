@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 
+import { recordedStep } from './recorded-step.mjs';
 import { worktreeIdentifier } from './worktree-identifier.mjs';
 
 function readJson(path) {
@@ -14,18 +15,6 @@ function readJsonIfPresent(path) {
 // The harness records raw `performance.now()` deltas. Reporting them to fifteen decimal places
 // implies a precision the measurement does not have.
 const ms = (value) => Number(value.toFixed(1));
-
-// Steps that leave no artifact of their own record a marker as they pass. Reading the marker keeps
-// the report from asserting a result it never observed.
-function recordedStep(name) {
-  try {
-    return readJson(`artifacts/reports/steps/${name}.json`).status;
-  } catch {
-    throw new Error(
-      `The ${name} step left no recorded result. Run the complete "npm run check:gate5" chain.`,
-    );
-  }
-}
 
 // §8.4 requires a full report with no unexplained skips. A step may be absent only if this file
 // names the reason, so "it did not run" can never pass review as silence.
@@ -52,6 +41,7 @@ const soak = readJsonIfPresent('artifacts/soak/soak-manifest.json');
 // is reported rather than ignored; it writes its own results file, so an opt-in run can never
 // overwrite the required Chromium and Firefox evidence.
 const webkit = readJsonIfPresent('artifacts/reports/webkit-results.json');
+const scaleHistoryPath = 'artifacts/reports/scale-history.jsonl';
 
 const screenshots = readdirSync('artifacts/screenshots').filter((file) => file.endsWith('.png'));
 const requiredScreenshots = [
@@ -113,12 +103,46 @@ if (undisclosed.length > 0) {
 // §8.3a performance targets at the stress ceiling. Per-event cost is a recorded, accepted deviation
 // there and nowhere else: below the ceiling every target is enforced.
 const atStressCeiling = scale.target.activities >= 10_000;
+
+// Per-event cost at the ceiling straddles its target rather than sitting on one side of it, so the
+// deviation is characterised across every recorded run rather than by whichever one this report
+// happened to read. Quoting a single sample would let a lucky run read as "all targets met".
+const history = existsSync(scaleHistoryPath)
+  ? readFileSync(scaleHistoryPath, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((run) => run.target?.activities >= 10_000)
+  : [];
+// The spec appends the run it just finished, so the current summary is normally already in the
+// history. Adding it again would count the latest sample twice and skew the spread toward it.
+const currentInHistory = history.some(({ at }) => at === scale.generatedAt);
+const perEventRuns = [
+  ...history.map(({ perEventMs }) => perEventMs),
+  ...(atStressCeiling && !currentInHistory ? [ms(scale.samples.at(-1).perEventMs)] : []),
+].filter((value) => typeof value === 'number');
+const spread = perEventRuns.length
+  ? {
+      runs: perEventRuns.length,
+      samplesMs: [...perEventRuns].sort((a, b) => a - b),
+      minMs: Math.min(...perEventRuns),
+      maxMs: Math.max(...perEventRuns),
+      overTarget: perEventRuns.filter((value) => value > 50).length,
+    }
+  : undefined;
+
 const perEventDeviation =
-  atStressCeiling && scale.samples.at(-1).perEventMs > 50
+  atStressCeiling && spread && spread.maxMs > 50
     ? {
         metric: 'perEventMs',
-        measured: Number(scale.samples.at(-1).perEventMs.toFixed(1)),
         target: 50,
+        thisRunMs: ms(scale.samples.at(-1).perEventMs),
+        spread,
+        ...(spread.runs < 3
+          ? {
+              caution: `Only ${spread.runs} ceiling run(s) are recorded here, which does not characterise a metric this variable. The measured spread across runs is described in docs/TRACEABILITY.md.`,
+            }
+          : {}),
         accepted:
           'Accepted for V1. Every other target is met at the ceiling, and every target including this one is met at a realistic session size. Closing it means incremental item maintenance, whose failure mode is stale or duplicated items after a thread merge deletes one — a correctness risk taken on for a cost that only appears at five times the realistic load.',
       }
@@ -134,6 +158,49 @@ if (scaleFailures.length > 0) {
   throw new Error(`Scale targets were not met: ${scaleFailures.join('; ')}.`);
 }
 
+// Console noise from the soak is classified here, not in the controller — the same rule TESTING.md
+// states for the Matrix run, and for the same reason: a stored manifest can be re-judged, while a
+// controller that judges at run time makes every misclassification cost another six hours.
+const soakNoise = [
+  // matrix-js-sdk polls .well-known for the MXID's domain once the client starts. The synthetic
+  // `ackwatch.test` server name never resolves, and Synapse answers 404 for its own well-known.
+  { pattern: /\/\.well-known\/matrix\/|ERR_NAME_NOT_RESOLVED/u },
+  // An unstable MSC4143 RTC-transports endpoint Synapse does not implement.
+  { pattern: /\/unstable\/org\.matrix\.msc4143\/rtc\/transports/u },
+  // Key backup is queried before this scenario ever creates one.
+  { pattern: /\/room_keys\/version\b/u },
+  // The static test host intentionally serves no favicon.
+  { pattern: /\/favicon\.ico$/u },
+  // The run drops the connection on purpose; in-flight requests fail while it is offline.
+  { pattern: /net::ERR_INTERNET_DISCONNECTED|ConnectionError|Failed to fetch/u },
+  // The app logs in with `refresh_token: true`, and Synapse's refreshable access tokens are short
+  // lived, so the first expiry surfaces as a 401 on the in-flight long-poll before the SDK
+  // refreshes and retries. Bounded deliberately: a handful is the refresh handshake, while a
+  // genuinely dead token produces a continuous stream — and `workflowExercised` is the backstop,
+  // since a session that never recovered would acknowledge nothing.
+  {
+    pattern: /\/_matrix\/client\/v3\/sync\b.*\b401\b|\b401\b.*\/_matrix\/client\/v3\/sync\b/u,
+    maxOccurrences: 3,
+  },
+];
+
+function classifySoakConsole(entries) {
+  const counts = new Map();
+  const unexplained = [];
+  for (const entry of entries) {
+    const text = `${entry.url ?? ''} ${entry.console ?? entry.message ?? ''}`;
+    const rule = soakNoise.find(({ pattern }) => pattern.test(text));
+    if (!rule) {
+      unexplained.push(entry);
+      continue;
+    }
+    const seen = (counts.get(rule) ?? 0) + 1;
+    counts.set(rule, seen);
+    if (rule.maxOccurrences !== undefined && seen > rule.maxOccurrences) unexplained.push(entry);
+  }
+  return unexplained;
+}
+
 // The soak is the §8.2 longevity evidence. A smoke run proves the harness works and nothing else,
 // so it is not accepted as the gate's evidence.
 let soakCheck;
@@ -145,17 +212,40 @@ if (!soak) {
   soakCheck = skipped(
     `The recorded soak was a ${soak.plannedMinutes}-minute smoke run, which exercises the harness but cannot establish a shift-length trend. Run "npm run test:soak" at its default length.`,
   );
-} else if (soak.result !== 'pass') {
-  throw new Error(
-    `The recorded soak failed: ${soak.failure ?? 'see artifacts/soak/soak-manifest.json'}`,
-  );
 } else {
+  // The controller's verdict is authoritative for everything it measures. Console classification
+  // is the one dimension it no longer owns, so a manifest whose only failure was that check is
+  // re-judged here instead of re-run. Every other recorded check must still pass on its own.
+  const reportOwned = new Set(['noUnexplainedConsoleErrors', 'consoleErrorsRecorded']);
+  const measured = (soak.checks ?? []).filter(({ name }) => !reportOwned.has(name));
+  const failedMeasured = measured.filter(({ status, advisory }) => status === 'fail' && !advisory);
+  if (failedMeasured.length > 0) {
+    throw new Error(
+      `The recorded soak failed: ${failedMeasured.map(({ name, detail }) => `${name} — ${detail}`).join('; ')}`,
+    );
+  }
+  if ((soak.pageErrors ?? []).length > 0) {
+    throw new Error(
+      `The recorded soak reported ${soak.pageErrors.length} uncaught page errors, which are never rig noise.`,
+    );
+  }
+  const unexplainedSoak = classifySoakConsole(soak.browserErrors ?? []);
+  if (unexplainedSoak.length > 0) {
+    throw new Error(
+      `The soak reported ${unexplainedSoak.length} unexplained console errors: ${JSON.stringify(unexplainedSoak)}`,
+    );
+  }
   soakCheck = {
     status: 'pass',
     minutes: soak.plannedMinutes,
     totals: soak.totals,
     growth: soak.growth,
-    checks: soak.checks.map(({ name, status }) => ({ name, status })),
+    consoleErrors: {
+      recorded: (soak.browserErrors ?? []).length,
+      classifiedAsRigNoise: (soak.browserErrors ?? []).length - unexplainedSoak.length,
+      unexplained: unexplainedSoak.length,
+    },
+    checks: measured.map(({ name, status }) => ({ name, status })),
   };
 }
 
@@ -220,8 +310,8 @@ const report = {
     ntfy: webhook.version,
   },
   checks: {
-    fastChecks: recordedStep('fastChecks'),
-    productionBuild: recordedStep('productionBuild'),
+    fastChecks: recordedStep('fastChecks', 5),
+    productionBuild: recordedStep('productionBuild', 5),
     unitAndComponent: { status: 'pass', tests: unit.numPassedTests, skipped: unit.numPendingTests },
     browsers: { status: 'pass', tests: browser.stats.expected, engines: ['chromium', 'firefox'] },
     webkitAdvisory: webkitCheck,
@@ -239,15 +329,16 @@ const report = {
       schedulerMs: ms(scale.schedulerMs),
       migrationMs: ms(scale.migrationMs),
       perEventMs: ms(scale.samples.at(-1).perEventMs),
+      ...(spread ? { perEventSpread: spread } : {}),
       ...(perEventDeviation ? { acceptedDeviation: perEventDeviation } : {}),
     },
     soak: soakCheck,
     localMatrix: { status: localMatrix.result, assertions: localMatrix.assertions },
     localWebhook: { status: webhook.result, assertions: webhook.assertions },
     remoteMatrix: remoteCheck,
-    secretScan: recordedStep('secretScan'),
-    trackedFileAudit: recordedStep('trackedFileAudit'),
-    dependencyAudit: recordedStep('dependencyAudit'),
+    secretScan: recordedStep('secretScan', 5),
+    trackedFileAudit: recordedStep('trackedFileAudit', 5),
+    dependencyAudit: recordedStep('dependencyAudit', 5),
     licenses: {
       status: 'pass',
       packages: licenses.dependencies.length,
@@ -288,7 +379,8 @@ Toolchain: ${report.versions.node}, ${report.versions.npm}
 - ${unit.numPassedTests} unit/component tests passed; ${unit.numPendingTests} service-gated test was exercised separately.
 - ${browser.stats.expected} system and accessibility tests passed in Chromium and Firefox under the production CSP.
 - ${visual.stats.expected} visual scenarios passed; the gallery is rendered from ${gallery.worktreeIdentifier}.
-- Scale at ${scale.target.activities} activities / ${scale.target.items} items: ${ms(scale.commandMs)} ms command, ${ms(scale.schedulerMs)} ms scheduler pass, ${ms(scale.samples.at(-1).perEventMs)} ms per event.${perEventDeviation ? ' Per-event cost is a recorded accepted deviation at this ceiling.' : ''}
+- Scale at ${scale.target.activities} activities / ${scale.target.items} items: ${ms(scale.commandMs)} ms command, ${ms(scale.schedulerMs)} ms scheduler pass, ${ms(scale.samples.at(-1).perEventMs)} ms per event.
+- Per ingested event straddles its 50 ms target rather than sitting on one side of it${spread ? `: ${plural(spread.runs, 'recorded ceiling run')} span ${spread.minMs}–${spread.maxMs} ms, ${spread.overTarget} of them over target` : ''}. ${perEventDeviation ? 'Recorded as an accepted deviation; a single run of this metric is not evidence either way.' : 'No recorded run exceeded the target, but see docs/TRACEABILITY.md for the measured spread before reading that as a pass.'}
 - Longevity: ${soakCheck.status === 'pass' ? `${soak.plannedMinutes}-minute soak passed with ${soak.totals.acknowledged} acknowledged and ${soak.totals.completed} completed across ${plural(soak.totals.reconnects, 'reconnect')}.` : soakCheck.reason}
 - The disposable Matrix run passed ${localMatrix.assertions.length} assertions; the self-hosted ntfy run passed ${webhook.assertions.length}.
 ${
