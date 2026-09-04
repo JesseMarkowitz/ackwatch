@@ -4,6 +4,9 @@ import {
   acceptAdditionalActivity,
   applyActivityMaintenance,
   applyQueueCommand,
+  compareByMostRecentlyCompleted,
+  compareByOldestAcknowledged,
+  compareByOldestDetected,
   compareQueueItems,
   conversationKeyFor,
   createQueueItem,
@@ -389,5 +392,46 @@ describe('deterministic sequence replay', () => {
         expect(current.status === 'COMPLETED').toBe(!current.deadline);
       }
     }
+  });
+});
+
+describe('column ordering', () => {
+  it('keeps the longest-waiting request on top even when someone chases it', () => {
+    // The case this exists for: an older request gets a "still waiting?" follow-up. That moves
+    // lastActivityAt but not firstDetectedAt, so ranking on the latter keeps the person who has
+    // waited longest at the top instead of rewarding whoever spoke most recently.
+    const older = item('NEW', { id: 'a', firstDetectedAt: 1_000, lastActivityAt: 9_000 });
+    const newer = item('NEW', { id: 'b', firstDetectedAt: 5_000, lastActivityAt: 6_000 });
+
+    expect([newer, older].sort(compareByOldestDetected).map(({ id }) => id)).toEqual(['a', 'b']);
+    // The storage order is the opposite, and deliberately so.
+    expect([older, newer].sort(compareQueueItems).map(({ id }) => id)).toEqual(['a', 'b']);
+  });
+
+  it('ranks open work by how long it has been acknowledged, not detected', () => {
+    const detectedFirst = item('ACKNOWLEDGED', {
+      id: 'a',
+      firstDetectedAt: 1_000,
+      acknowledgedAt: 9_000,
+    });
+    const acknowledgedFirst = item('ACKNOWLEDGED', {
+      id: 'b',
+      firstDetectedAt: 5_000,
+      acknowledgedAt: 6_000,
+    });
+
+    expect(
+      [detectedFirst, acknowledgedFirst].sort(compareByOldestAcknowledged).map(({ id }) => id),
+    ).toEqual(['b', 'a']);
+  });
+
+  it('shows the most recently completed work first', () => {
+    const earlier = item('COMPLETED', { id: 'a', completedAt: 1_000 });
+    const later = item('COMPLETED', { id: 'b', completedAt: 9_000 });
+
+    expect([earlier, later].sort(compareByMostRecentlyCompleted).map(({ id }) => id)).toEqual([
+      'b',
+      'a',
+    ]);
   });
 });

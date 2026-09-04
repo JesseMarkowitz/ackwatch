@@ -11,7 +11,20 @@ import { WebhookCredentialStore } from '../infrastructure/browser/webhook-creden
 import { WebhookTransport } from '../infrastructure/browser/webhook-transport';
 import type { AccountSettingsRecord } from '../infrastructure/persistence/workflow-database';
 
-export type AlertChannelState = 'disabled' | 'ready' | 'permission_required' | 'retrying' | 'fault';
+/**
+ * `untested` is configured but not yet exercised in this session.
+ *
+ * A webhook needs no permission from anyone, so reporting it as `permission_required` told the
+ * operator to go and set up something that was already saved and working — and the state flipped to
+ * ready the moment a test ran, which is the tell. Audio and notifications genuinely do require a
+ * gesture or a grant, so `permission_required` stays honest for them.
+ *
+ * The distinction is deliberately not collapsed into `ready`: a channel that has never delivered
+ * anything has not been shown to work, and this application has already shipped a webhook that was
+ * broken in every browser while every indicator looked fine.
+ */
+export type AlertChannelState =
+  'disabled' | 'untested' | 'ready' | 'permission_required' | 'retrying' | 'fault';
 
 export interface AlertChannelsSnapshot {
   readonly audio: AlertChannelState;
@@ -29,6 +42,7 @@ export interface BrowserAlertCoordinatorPort {
   prepareForMonitoring(): Promise<void>;
   requestNotificationPermission(): Promise<void>;
   sendTestWebhook(): Promise<void>;
+  sendTestAudio(): Promise<void>;
   setWebhookToken(token: string): void;
   clearWebhookToken(): void;
   snapshot(): AlertChannelsSnapshot;
@@ -62,7 +76,7 @@ export class BrowserAlertCoordinator implements BrowserAlertCoordinatorPort {
     this.state = {
       audio: settings.audioEnabled ? 'permission_required' : 'disabled',
       notifications: settings.browserNotificationsEnabled ? 'permission_required' : 'disabled',
-      webhook: settings.webhookEnabled ? 'permission_required' : 'disabled',
+      webhook: settings.webhookEnabled ? 'untested' : 'disabled',
     };
     this.audio = new AudioAlertTransport(() => this.getSettings().audioVolume);
     const notificationConstructor =
@@ -145,19 +159,51 @@ export class BrowserAlertCoordinator implements BrowserAlertCoordinatorPort {
     const payload: GenericAlertPayload = {
       schema: 'ackwatch.alert.v1',
       effectId: `test:${now}`,
+      reference: 'test',
       eventKind: 'new_activity',
       detectedAt: now,
+      lastActivityAt: now,
       evaluatedAt: now,
       ageMs: 0,
       status: 'NEW',
       unseenCount: 1,
       escalationStage: 0,
+      // Marked so a test can never be mistaken for real work needing attention.
+      test: true,
     };
     try {
       await this.webhook.send(payload);
       this.setState({ webhook: 'ready', webhookDetail: undefined });
     } catch (error: unknown) {
       this.setState({ webhook: 'fault', webhookDetail: this.errorCode(error) });
+      throw error;
+    }
+  }
+
+  public async sendTestAudio(): Promise<void> {
+    const now = this.clock.now();
+    const payload: GenericAlertPayload = {
+      schema: 'ackwatch.alert.v1',
+      effectId: `test-audio:${now}`,
+      reference: 'test',
+      eventKind: 'new_activity',
+      detectedAt: now,
+      lastActivityAt: now,
+      evaluatedAt: now,
+      ageMs: 0,
+      status: 'NEW',
+      unseenCount: 1,
+      escalationStage: 0,
+      test: true,
+    };
+    try {
+      // Unlocked first: a browser only permits sound after a gesture, and this runs inside the
+      // click that asked for it, which is exactly the condition a real alert cannot rely on.
+      await this.audio.prepare();
+      await this.audio.send(payload);
+      this.setState({ audio: 'ready', audioDetail: undefined });
+    } catch (error: unknown) {
+      this.setState({ audio: 'fault', audioDetail: this.errorCode(error) });
       throw error;
     }
   }
@@ -186,7 +232,7 @@ export class BrowserAlertCoordinator implements BrowserAlertCoordinatorPort {
         : 'disabled',
       webhook: settings.webhookEnabled
         ? this.state.webhook === 'disabled'
-          ? 'permission_required'
+          ? 'untested'
           : this.state.webhook
         : 'disabled',
     };
@@ -211,7 +257,9 @@ export class BrowserAlertCoordinator implements BrowserAlertCoordinatorPort {
 
   private errorCode(error: unknown): string {
     return error instanceof AlertTransportError
-      ? error.code
+      ? error.underlying === undefined
+        ? error.code
+        : `${error.code} (${error.underlying})`
       : error instanceof Error
         ? error.message
         : 'Unknown alert failure.';

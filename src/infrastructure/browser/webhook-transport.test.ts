@@ -9,6 +9,8 @@ const accountId = '@monitor:example.test|https://example.test';
 const payload: GenericAlertPayload = {
   schema: 'ackwatch.alert.v1',
   effectId: 'effect-id',
+  reference: 'ref12345',
+  lastActivityAt: 1_000,
   eventKind: 'new_activity',
   detectedAt: 1_000,
   evaluatedAt: 2_000,
@@ -30,6 +32,41 @@ describe('WebhookTransport', () => {
     expect(() =>
       webhookDestination({ ...base, webhookEndpoint: 'https://token@example.test/hook' }),
     ).toThrow('DESTINATION_MUST_NOT_CONTAIN_CREDENTIALS_OR_QUERY');
+  });
+
+  it('never invokes the global fetch with the transport as its receiver', async () => {
+    // `fetch` is a method of `Window`. Held on an instance and called as `this.fetchFn(...)` it
+    // runs with the transport as receiver, and a browser throws "Illegal invocation" — which this
+    // class caught and reported as a connection or CORS failure, so no webhook ever left a real
+    // browser while every message blamed the network. Node's fetch ignores its receiver, so this
+    // has to be asserted directly rather than discovered by sending anything.
+    const original = globalThis.fetch;
+    let called = false;
+    let receiverWasGlobal = false;
+    globalThis.fetch = function (this: unknown) {
+      called = true;
+      // Recorded as a verdict rather than aliased, which is what a browser actually enforces.
+      receiverWasGlobal = this === undefined || this === globalThis;
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    } as unknown as typeof fetch;
+    try {
+      const settings = {
+        ...defaultAccountSettings(accountId, 1_000),
+        webhookEnabled: true,
+        webhookEndpoint: 'https://receiver.example',
+      };
+      // Constructed without an injected fetch, which is how the application builds it.
+      const transport = new WebhookTransport(
+        accountId,
+        () => settings,
+        new WebhookCredentialStore(sessionStorage),
+      );
+      await transport.send(payload);
+    } finally {
+      globalThis.fetch = original;
+    }
+    expect(called).toBe(true);
+    expect(receiverWasGlobal).toBe(true);
   });
 
   it('sends generic JSON with stable idempotency and session-only bearer credentials', async () => {

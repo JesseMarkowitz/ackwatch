@@ -14,6 +14,8 @@ const credential = 'receiver-secret-value';
 const payload: GenericAlertPayload = {
   schema: 'ackwatch.alert.v1',
   effectId: 'item-cycle-initial-0',
+  reference: 'ref12345',
+  lastActivityAt: 1_000,
   eventKind: 'new_activity',
   detectedAt: 1_000,
   evaluatedAt: 2_000,

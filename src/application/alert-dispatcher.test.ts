@@ -114,14 +114,24 @@ describe('AlertDispatcher', () => {
     expect(payload).toEqual({
       schema: 'ackwatch.alert.v1',
       effectId: 'effect',
+      reference: 'item',
       eventKind: 'unacknowledged',
       detectedAt: 1_000,
+      lastActivityAt: 1_000,
       evaluatedAt: 6_000,
       ageMs: 5_000,
       status: 'NEW',
       unseenCount: 1,
       escalationStage: 2,
     });
+
+    // The exact-shape assertion above is what keeps a new field from being added without someone
+    // deciding it is safe to send. This says why the reference is: it comes from the item's own
+    // random id, never from the room, the conversation key, or an event.
+    const serialized = JSON.stringify(payload);
+    for (const identifier of ['!private:example.test', 'event:private', accountId]) {
+      expect(serialized).not.toContain(identifier);
+    }
   });
 });
 

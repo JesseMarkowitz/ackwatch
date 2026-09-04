@@ -68,6 +68,7 @@ function durableDependencies() {
       prepareForMonitoring: async () => undefined,
       requestNotificationPermission: async () => undefined,
       sendTestWebhook: async () => undefined,
+      sendTestAudio: async () => undefined,
       setWebhookToken: () => undefined,
       clearWebhookToken: () => undefined,
       snapshot: () => ({

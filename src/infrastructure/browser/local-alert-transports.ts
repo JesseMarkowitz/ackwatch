@@ -1,5 +1,6 @@
 import {
   AlertTransportError,
+  alertMessage,
   type AlertTransport,
   type GenericAlertPayload,
 } from '../../application/alert-dispatcher';
@@ -77,10 +78,16 @@ export class BrowserNotificationTransport implements AlertTransport {
     if (this.notifications.permission !== 'granted') {
       throw new AlertTransportError('NOTIFICATION_PERMISSION_DENIED', false);
     }
-    new this.notifications('AckWatch attention required', {
-      body: 'Matrix activity needs attention.',
-      tag: `ackwatch:${payload.effectId}`,
-    });
+    // The same sentence every other transport sends, including the item reference printed on the
+    // card. A notification saying only "Matrix activity needs attention" cannot be acted on without
+    // opening the app to work out which item it meant.
+    new this.notifications(
+      payload.test ? 'AckWatch test notification' : 'AckWatch: attention required',
+      {
+        body: alertMessage(payload),
+        tag: `ackwatch:${payload.effectId}`,
+      },
+    );
     return {};
   }
 }

@@ -52,7 +52,7 @@ export interface AlertDeliveryRecord {
   readonly effectId: string;
   readonly itemId: string;
   readonly transport: AlertTransportKind;
-  readonly status: 'pending' | 'delivering' | 'delivered' | 'exhausted';
+  readonly status: 'pending' | 'delivering' | 'delivered' | 'exhausted' | 'dismissed';
   readonly attemptCount: number;
   readonly nextAttemptAt: number;
   readonly leaseUntil?: number | undefined;

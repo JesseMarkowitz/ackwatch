@@ -104,9 +104,22 @@ export interface SafeMediaMetadata {
   readonly height?: number;
 }
 
+/** The bound ADR-0005 puts on stored plaintext, in characters rather than UTF-16 units. */
+export const PREVIEW_CHARACTER_LIMIT = 160;
+
+/**
+ * An ellipsis is appended when, and only when, text was actually removed.
+ *
+ * Without it a cut-off preview is indistinguishable from a short message that happens to end
+ * mid-sentence, so the display cannot tell the reader whether they are looking at the whole thing.
+ * Marking it here rather than in the UI means every surface that renders a preview inherits the
+ * signal, and it needs no schema change to carry a separate flag.
+ */
 function boundedPreview(value: unknown): string {
   if (typeof value !== 'string') return '';
-  return Array.from(value).slice(0, 160).join('');
+  const characters = Array.from(value);
+  if (characters.length <= PREVIEW_CHARACTER_LIMIT) return value;
+  return `${characters.slice(0, PREVIEW_CHARACTER_LIMIT).join('')}…`;
 }
 
 function safeNonnegativeInteger(value: unknown): number | undefined {

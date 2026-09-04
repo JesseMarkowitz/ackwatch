@@ -13,8 +13,15 @@ describe('foundation shell', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    expect(screen.getByRole('heading', { name: /important messages/i })).toBeInTheDocument();
     expect(screen.getByText(/validates discovery/i)).toBeInTheDocument();
+
+    // The shell no longer carries a pitch, so About is where the product explains itself — and it
+    // must still state the boundary that matters rather than selling.
+    await user.click(screen.getByRole('button', { name: /about/i }));
+    expect(screen.getByRole('dialog', { name: /ackwatch/i })).toBeInTheDocument();
+    expect(screen.getByText(/monitoring stops/i)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /close/i }));
+    expect(screen.queryByRole('dialog', { name: /ackwatch/i })).not.toBeInTheDocument();
 
     await user.type(screen.getByLabelText(/matrix user id/i), '@operator:example.test');
     await user.click(screen.getByRole('button', { name: /continue/i }));
@@ -122,7 +129,9 @@ describe('foundation shell', () => {
       requestNotificationPermission: async () => undefined,
       setWebhookToken: () => undefined,
       sendTestWebhook: async () => undefined,
+      sendTestAudio: async () => undefined,
       retryAlertDelivery: async () => undefined,
+      dismissAlertDelivery: async () => undefined,
       resolveEventDetail: async (roomId, eventId) => ({
         availability: 'available',
         roomId,

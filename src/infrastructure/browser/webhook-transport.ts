@@ -1,5 +1,6 @@
 import {
   AlertTransportError,
+  alertMessage,
   type AlertTransport,
   type GenericAlertPayload,
 } from '../../application/alert-dispatcher';
@@ -41,7 +42,13 @@ export class WebhookTransport implements AlertTransport {
     private readonly accountId: string,
     private readonly settings: () => AccountSettingsRecord,
     private readonly credentials: WebhookCredentialStorePort,
-    private readonly fetchFn: typeof fetch = fetch,
+    // Wrapped, not passed bare. `fetch` is a method of `Window`, and holding it on an instance
+    // means `this.fetchFn(...)` invokes it with the transport as receiver, which browsers reject
+    // with "Illegal invocation". The resulting TypeError was caught below and relabelled a
+    // connection or CORS failure, so every webhook delivery failed in a browser while pointing the
+    // reader at the network. Node's fetch does not care about the receiver, so the whole test
+    // suite passed against it.
+    private readonly fetchFn: typeof fetch = (input, init) => fetch(input, init),
   ) {}
 
   public async send(payload: GenericAlertPayload): Promise<{ responseStatus: number }> {
@@ -62,9 +69,15 @@ export class WebhookTransport implements AlertTransport {
           settings.webhookPreset === 'ntfy'
             ? {
                 topic: settings.webhookTopic,
-                title: 'AckWatch attention required',
-                message: `Matrix activity needs attention. Status ${payload.status}; escalation stage ${payload.escalationStage}; age ${payload.ageMs} ms.`,
-                sequence_id: payload.effectId,
+                title: payload.test ? 'AckWatch test notification' : 'AckWatch: attention required',
+                message: alertMessage(payload),
+                // No `sequence_id`. That field is ntfy's handle for updating or deleting a
+                // notification it already accepted, and it enforces its own format; AckWatch's
+                // effect ids are `itemId|cycleId|kind|stage`, which ntfy rejects outright with
+                // "sequence ID invalid". Every real ntfy alert failed with HTTP 400 because of it.
+                // AckWatch never updates or deletes a published notification, so it has no
+                // business claiming a sequence id. Idempotency travels in the `Idempotency-Key`
+                // header, which is the generic mechanism and applies to both presets.
               }
             : payload,
         ),
@@ -86,7 +99,12 @@ export class WebhookTransport implements AlertTransport {
     } catch (error: unknown) {
       if (error instanceof AlertTransportError) throw error;
       if (abort.signal.aborted) throw new AlertTransportError('TIMEOUT', true);
-      throw new AlertTransportError('CONNECTION_OR_CORS_FAILURE', true);
+      throw new AlertTransportError(
+        'CONNECTION_OR_CORS_FAILURE',
+        true,
+        undefined,
+        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      );
     } finally {
       clearTimeout(timeout);
     }

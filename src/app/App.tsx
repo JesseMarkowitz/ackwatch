@@ -12,8 +12,16 @@ import {
 import type { AckWatchControllerPort, AppSnapshot } from '../application/app-controller';
 import type { FoundationViewModel } from './view-model';
 import { signedOutView } from './view-model';
-import { matrixEventUri, type QueueActivity, type QueueItem } from '../domain/queue';
+import {
+  compareByMostRecentlyCompleted,
+  compareByOldestAcknowledged,
+  compareByOldestDetected,
+  matrixEventUri,
+  type QueueActivity,
+  type QueueItem,
+} from '../domain/queue';
 import type { EventDetail } from '../application/event-detail';
+import { itemReference } from '../application/alert-dispatcher';
 
 interface AppProps {
   readonly controller?: AckWatchControllerPort;
@@ -22,6 +30,18 @@ interface AppProps {
 }
 
 const noSubscription = () => () => undefined;
+
+const timestampFormat = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+});
+
+/** Absolute time, because an operator correlates a card against the room it came from. */
+function formatTimestamp(value: number | undefined): string {
+  return value === undefined ? 'Unknown time' : timestampFormat.format(value);
+}
 
 function snapshotFromView(view: FoundationViewModel): AppSnapshot {
   const connection = view.isSignedIn
@@ -102,6 +122,7 @@ function coverageTone(connection: AppSnapshot['coverage']['connection']): string
 
 function alertTone(state: AppSnapshot['alerts']['audio']): string {
   if (state === 'ready') return 'healthy';
+  if (state === 'untested') return 'neutral';
   if (state === 'retrying' || state === 'permission_required') return 'warning';
   if (state === 'fault') return 'danger';
   return 'neutral';
@@ -111,6 +132,7 @@ const alertLabels: Record<AppSnapshot['alerts']['audio'], string> = {
   disabled: 'Disabled',
   ready: 'Ready',
   permission_required: 'Needs setup',
+  untested: 'Not tested',
   retrying: 'Retrying',
   fault: 'Fault',
 };
@@ -127,6 +149,25 @@ function AlertSettingsPanel({
   const [topic, setTopic] = useState(settings?.webhookTopic ?? '');
   const [token, setToken] = useState('');
   const [status, setStatus] = useState('');
+  const [playingTone, setPlayingTone] = useState(false);
+  // Reported beside the button that caused it: a shared status line put the answer under the
+  // webhook section, where nobody testing audio would look.
+  const [toneStatus, setToneStatus] = useState('');
+  // Settings arrive from IndexedDB after this panel first renders, and `useState` only seeds on
+  // that first render — so a saved webhook came back blank after every reload, and pressing save
+  // from the blank form would have erased a working configuration. Re-seed when the stored value
+  // changes; it only changes when a save succeeds.
+  const storedEndpoint = settings?.webhookEndpoint;
+  const storedTopic = settings?.webhookTopic;
+  const [seeded, setSeeded] = useState({ endpoint: storedEndpoint, topic: storedTopic });
+  if (seeded.endpoint !== storedEndpoint || seeded.topic !== storedTopic) {
+    // Adjusted during render rather than in an effect, which is what React documents for syncing
+    // state to a changed input: an effect would commit a render showing the stale blank fields
+    // first, and the lint rule that forbids it is right.
+    setSeeded({ endpoint: storedEndpoint, topic: storedTopic });
+    setEndpoint(storedEndpoint ?? '');
+    setTopic(storedTopic ?? '');
+  }
   const destinationOrigin = useMemo(() => {
     try {
       return endpoint ? new URL(endpoint).origin : 'Not configured';
@@ -170,6 +211,38 @@ function AlertSettingsPanel({
             }
           />
         </label>
+        {/*
+          Plays the real tone at the configured volume, inside the click that asked for it. The
+          readiness indicator alone cannot answer "will I actually hear this": the unlock check
+          plays the clip muted, and browsers allow muted playback unconditionally.
+        */}
+        <button
+          type="button"
+          className={`button-secondary${playingTone ? ' is-active' : ''}`}
+          disabled={playingTone}
+          onClick={() => {
+            setPlayingTone(true);
+            setToneStatus('Playing the alert tone…');
+            const settled = controller?.sendTestAudio() ?? Promise.resolve();
+            void Promise.all([
+              settled.then(
+                () => setToneStatus('Alert tone played at the configured volume.'),
+                (error: unknown) =>
+                  setToneStatus(
+                    `Alert tone failed — ${error instanceof Error ? error.message : String(error)}`,
+                  ),
+              ),
+              // Held long enough to be seen. The clip is a fraction of a second, so feedback tied
+              // strictly to its duration would flicker and read as nothing happening.
+              new Promise((resolve) => setTimeout(resolve, 600)),
+            ]).finally(() => setPlayingTone(false));
+          }}
+        >
+          {playingTone ? 'Playing…' : 'Test alert tone'}
+        </button>
+        <p className="alert-settings__status" aria-live="polite" role="status">
+          {toneStatus}
+        </p>
         <label>
           <input
             type="checkbox"
@@ -259,7 +332,12 @@ function AlertSettingsPanel({
               onClick={() =>
                 void controller?.sendTestWebhook().then(
                   () => setStatus('Test notification delivered.'),
-                  () => setStatus('Test failed; review webhook health and browser CORS access.'),
+                  (error: unknown) =>
+                    // Report what actually failed rather than the likeliest cause. A guessed
+                    // explanation sends the reader somewhere else entirely when it is wrong.
+                    setStatus(
+                      `Test failed — ${error instanceof Error ? error.message : String(error)}`,
+                    ),
                 )
               }
             >
@@ -278,23 +356,86 @@ function AlertSettingsPanel({
               Disable webhook
             </button>
           </div>
-          <p aria-live="polite">{status}</p>
         </details>
-        {(snapshot.alertDeliveries ?? []).map((delivery) => (
-          <div className="alert-retry" key={delivery.id}>
-            <span>
-              {delivery.transport} exhausted: {delivery.lastErrorCode ?? 'unknown failure'}
-            </span>
+        <p className="alert-settings__status" aria-live="polite" role="status">
+          {status}
+        </p>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Exhausted deliveries, summarised rather than listed.
+ *
+ * One row per failure with its own retry button is fine for one failure and unusable for forty: a
+ * misconfigured webhook fails identically every time, and the wall of rows buried the settings that
+ * would fix it. Failures are grouped by the reason they share, retried together, and the individual
+ * entries stay available behind a disclosure for when the reason is not the same.
+ */
+function ExhaustedDeliveries({
+  deliveries,
+  controller,
+}: {
+  readonly deliveries: NonNullable<AppSnapshot['alertDeliveries']>;
+  readonly controller: AckWatchControllerPort | undefined;
+}) {
+  const [busy, setBusy] = useState(false);
+  if (deliveries.length === 0) return null;
+
+  const groups = new Map<string, { transport: string; reason: string; ids: string[] }>();
+  for (const delivery of deliveries) {
+    const reason = delivery.lastErrorCode ?? 'unknown failure';
+    const key = `${delivery.transport}|${reason}`;
+    const group = groups.get(key) ?? { transport: delivery.transport, reason, ids: [] };
+    group.ids.push(delivery.id);
+    groups.set(key, group);
+  }
+
+  const act = (ids: readonly string[], run: (id: string) => Promise<void> | undefined) => {
+    setBusy(true);
+    void Promise.allSettled(ids.map((id) => run(id))).finally(() => setBusy(false));
+  };
+
+  return (
+    <section className="alert-retry-summary" aria-label="Alert deliveries needing a decision">
+      <p className="alert-retry-summary__headline">
+        {deliveries.length} {deliveries.length === 1 ? 'delivery' : 'deliveries'} exhausted their
+        retries. Dismissing keeps the record and stops it asking for a decision; ending the session
+        clears them all.
+      </p>
+      {[...groups.values()].map((group) => (
+        <div className="alert-retry" key={`${group.transport}|${group.reason}`}>
+          <span>
+            {group.transport} · {group.reason}
+            {group.ids.length > 1 ? ` · ${group.ids.length} deliveries` : ''}
+          </span>
+          {/*
+            Audio is not offered a retry. A sound that was missed cannot be usefully played later,
+            and replaying a backlog would fire the whole queue at once — twenty-five chimes in a row
+            tells the operator nothing about twenty-five separate moments that have passed. The
+            failure is still worth showing, so it can be dismissed instead.
+          */}
+          {group.transport === 'audio' ? null : (
             <button
               type="button"
               className="button-secondary"
-              onClick={() => void controller?.retryAlertDelivery(delivery.id)}
+              disabled={busy}
+              onClick={() => act(group.ids, (id) => controller?.retryAlertDelivery(id))}
             >
-              Retry delivery
+              {group.ids.length > 1 ? `Retry all ${group.ids.length}` : 'Retry delivery'}
             </button>
-          </div>
-        ))}
-      </div>
+          )}
+          <button
+            type="button"
+            className="button-secondary"
+            disabled={busy}
+            onClick={() => act(group.ids, (id) => controller?.dismissAlertDelivery(id))}
+          >
+            {group.ids.length > 1 ? `Dismiss ${group.ids.length}` : 'Dismiss'}
+          </button>
+        </div>
+      ))}
     </section>
   );
 }
@@ -317,6 +458,12 @@ function CryptoSecurityPanel({
       <div>
         <p className="eyebrow">Encrypted Matrix</p>
         <h2 id="crypto-settings-heading">Durable device security</h2>
+        <p>
+          Set this up to read message text from <strong>encrypted rooms</strong>. Without it those
+          items still appear in the queue and still alert you, but their content shows as an
+          encrypted placeholder, because a new device holds no keys for history. Rooms that are not
+          encrypted need nothing here. This is one-time setup per device, not a per-session step.
+        </p>
         <p>
           Rust crypto uses an account-and-device-specific IndexedDB store. Recovery secrets stay in
           memory for this session and are never placed in workflow exports.
@@ -633,12 +780,31 @@ const QueueCard = memo(function QueueCard({
     >
       <div className="queue-card__meta">
         <span>{latest?.roomName ?? item.roomId}</span>
+        <span className="queue-card__reference" title="Reference used in external alerts">
+          {itemReference(item.id)}
+        </span>
         <span>
           {item.activityCount} activit{item.activityCount === 1 ? 'y' : 'ies'}
         </span>
       </div>
+      <p className="queue-card__detected">
+        Detected{' '}
+        <time dateTime={new Date(item.firstDetectedAt).toISOString()}>
+          {formatTimestamp(item.firstDetectedAt)}
+        </time>
+        {item.lastActivityAt !== item.firstDetectedAt
+          ? ` · latest ${formatTimestamp(item.lastActivityAt)}`
+          : ''}
+      </p>
       <h3>{latest?.sender ?? 'Matrix activity'}</h3>
-      <p>{latest?.preview ?? 'Detail is temporarily unavailable.'}</p>
+      <p>
+        {latest?.preview ?? 'Detail is temporarily unavailable.'}
+        {latest?.preview?.endsWith('…') ? (
+          <span className="truncation-badge" title="Shortened; open details for the full message">
+            shortened
+          </span>
+        ) : null}
+      </p>
       <div className="queue-card__status">
         <strong>{item.needsAttention ? 'Needs attention' : item.status}</strong>
         <span>{deadlineLabel(item)}</span>
@@ -647,6 +813,20 @@ const QueueCard = memo(function QueueCard({
         <button type="button" onClick={() => openDetails(item.id)}>
           View details
         </button>
+        {/*
+          Acknowledging used to require opening the item, which made the most common action on the
+          board the only one that cost a dialog — and hid it well enough that an automated soak run
+          completed twenty-one items without acknowledging any.
+        */}
+        {item.status === 'NEW' || item.status === 'UNACKNOWLEDGED' ? (
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={() => void controller?.applyQueueCommand(item.id, 'acknowledge')}
+          >
+            Acknowledge
+          </button>
+        ) : null}
         {item.status === 'ACKNOWLEDGED' && item.needsAttention ? (
           <button
             type="button"
@@ -678,33 +858,96 @@ const QueueCard = memo(function QueueCard({
   );
 });
 
+/**
+ * Ephemeral filter over completed history: set while looking, gone when the tab closes.
+ *
+ * Not persisted deliberately — it narrows what you are reading right now, and a saved filter would
+ * silently hide history the next time the app opened, which is the worst failure available to a
+ * record you consult to find something.
+ *
+ * Search covers what AckWatch actually holds: the item reference printed on alerts, the sender, the
+ * room name, and the stored preview. The preview is bounded to 160 characters (ADR-0005), so text
+ * past that point is not searchable here — the limitation is stated in the placeholder rather than
+ * left to be discovered by a search that quietly finds nothing.
+ */
+function matchesQuery(item: QueueItem, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (needle === '') return true;
+  const latest = item.latestActivity;
+  return [
+    itemReference(item.id),
+    latest?.sender,
+    latest?.roomName,
+    item.roomId,
+    latest?.preview,
+  ].some((field) => field?.toLowerCase().includes(needle));
+}
+
 function QueueSection({
   title,
   empty,
   items,
   controller,
   openDetails,
+  searchable = false,
 }: {
   readonly title: string;
   readonly empty: string;
   readonly items: readonly QueueItem[];
   readonly controller: AckWatchControllerPort | undefined;
   readonly openDetails: (itemId: string) => void;
+  readonly searchable?: boolean;
 }) {
+  const [query, setQuery] = useState('');
+  const [limit, setLimit] = useState(25);
+  const slug = title.replaceAll(' ', '-').toLowerCase();
+  const matched = searchable ? items.filter((item) => matchesQuery(item, query)) : items;
+  const shown = searchable ? matched.slice(0, limit) : matched;
+
   return (
-    <section
-      className="queue-column"
-      aria-labelledby={`queue-${title.replaceAll(' ', '-').toLowerCase()}`}
-    >
+    <section className="queue-column" aria-labelledby={`queue-${slug}`}>
       <header>
-        <h2 id={`queue-${title.replaceAll(' ', '-').toLowerCase()}`}>{title}</h2>
+        <h2 id={`queue-${slug}`}>{title}</h2>
         <span aria-label={`${items.length} items`}>{items.length}</span>
       </header>
-      {items.length === 0 ? (
-        <p className="queue-column__empty">{empty}</p>
+      {searchable ? (
+        <div className="queue-filter">
+          <label className="visually-hidden" htmlFor={`filter-${slug}`}>
+            Search {title}
+          </label>
+          <input
+            id={`filter-${slug}`}
+            type="search"
+            value={query}
+            placeholder="Reference, sender, room, or preview text"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <label htmlFor={`limit-${slug}`}>Show</label>
+          <select
+            id={`limit-${slug}`}
+            value={limit}
+            onChange={(event) => setLimit(Number(event.target.value))}
+          >
+            {[10, 25, 50, 100].map((value) => (
+              <option key={value} value={value}>
+                last {value}
+              </option>
+            ))}
+          </select>
+          <span className="queue-filter__count">
+            {matched.length === items.length
+              ? `${shown.length} of ${items.length}`
+              : `${shown.length} of ${matched.length} matching · ${items.length} total`}
+          </span>
+        </div>
+      ) : null}
+      {shown.length === 0 ? (
+        <p className="queue-column__empty">
+          {items.length === 0 ? empty : 'Nothing matches that search.'}
+        </p>
       ) : (
         <div className="queue-column__items">
-          {items.map((item) => (
+          {shown.map((item) => (
             <QueueCard
               key={item.id}
               item={item}
@@ -804,6 +1047,22 @@ function ItemDetail({
         </div>
         <dl className="detail-facts">
           <div>
+            <dt>Detected</dt>
+            <dd>
+              <time dateTime={new Date(item.firstDetectedAt).toISOString()}>
+                {formatTimestamp(item.firstDetectedAt)}
+              </time>
+            </dd>
+          </div>
+          <div>
+            <dt>Latest here</dt>
+            <dd>
+              <time dateTime={new Date(item.lastActivityAt).toISOString()}>
+                {formatTimestamp(item.lastActivityAt)}
+              </time>
+            </dd>
+          </div>
+          <div>
             <dt>Sender</dt>
             <dd>
               {resolvedDetail?.availability === 'available'
@@ -816,13 +1075,15 @@ function ItemDetail({
             <dd>{item.status}</dd>
           </div>
           <div>
-            <dt>Detected</dt>
+            <dt>Sent</dt>
             <dd>
-              {new Date(
-                resolvedDetail?.availability === 'available'
-                  ? resolvedDetail.originServerTs
-                  : (latest?.detectedAt ?? item.firstDetectedAt),
-              ).toLocaleString()}
+              {resolvedDetail?.availability === 'available' ? (
+                <time dateTime={new Date(resolvedDetail.originServerTs).toISOString()}>
+                  {formatTimestamp(resolvedDetail.originServerTs)}
+                </time>
+              ) : (
+                'Unavailable until detail resolves'
+              )}
             </dd>
           </div>
           <div>
@@ -841,6 +1102,13 @@ function ItemDetail({
               : (latest?.preview ??
                 'Full detail is temporarily unavailable from the Matrix client.')}
           </p>
+          {resolvedDetail?.availability === 'available' ? null : (
+            <p className="truncation-note" role="status">
+              Showing the stored preview
+              {latest?.preview?.endsWith('…') ? ', which is shortened' : ''}. The full message could
+              not be resolved from the Matrix client.
+            </p>
+          )}
           {latest ? (
             <small>
               {resolvedDetail?.availability === 'available'
@@ -881,17 +1149,35 @@ function ItemDetail({
           ) : null}
         </div>
         {itemActivities.length > 1 ? (
-          <ol className="detail-activity-list" aria-label="Item activity history">
-            {itemActivities.map((activity) => (
-              <li key={activity.id}>
-                <div>
-                  <strong>{activity.sender}</strong>
-                  <span>{activity.relationKind}</span>
-                </div>
-                <p>{activity.preview}</p>
-              </li>
-            ))}
-          </ol>
+          <>
+            <p className="field-help">
+              Earlier messages are shown as stored previews, bounded to 160 characters so that
+              little plaintext rests on this device. The newest message is shown in full above,
+              resolved from the Matrix client on demand.
+            </p>
+            <ol className="detail-activity-list" aria-label="Item activity history">
+              {itemActivities.map((activity) => (
+                <li key={activity.id}>
+                  <div>
+                    <strong>{activity.sender}</strong>
+                    <span>{activity.relationKind}</span>
+                    <time
+                      className="detail-activity-list__time"
+                      dateTime={new Date(activity.detectedAt).toISOString()}
+                    >
+                      {formatTimestamp(activity.detectedAt)}
+                    </time>
+                  </div>
+                  <p>
+                    {activity.preview}
+                    {activity.preview.endsWith('…') ? (
+                      <span className="truncation-badge">shortened</span>
+                    ) : null}
+                  </p>
+                </li>
+              ))}
+            </ol>
+          </>
         ) : null}
         <div className="detail-actions">
           {item.status === 'NEW' || item.status === 'UNACKNOWLEDGED' ? (
@@ -943,6 +1229,331 @@ function ItemDetail({
   );
 }
 
+function AboutPanel({ close }: { readonly close: () => void }) {
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    panel.current?.focus();
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [close]);
+
+  return (
+    <div className="detail-backdrop">
+      <section
+        ref={panel}
+        className="detail-panel about-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="about-title"
+        tabIndex={-1}
+      >
+        <div className="detail-panel__header">
+          <div>
+            <p className="eyebrow">About</p>
+            <h2 id="about-title">AckWatch</h2>
+          </div>
+          <button type="button" className="button-secondary" onClick={close}>
+            Close
+          </button>
+        </div>
+        <p>
+          AckWatch watches the Matrix rooms you supervise during a working session and turns
+          activity that needs a response into a queue item, which stays visible until you
+          acknowledge and complete it.
+        </p>
+        <p>
+          Everything it knows lives in this browser. There is no AckWatch server, no account, and no
+          telemetry. Your Matrix password is held for the session only and never stored.
+        </p>
+        <p>
+          It monitors only while this page is open, and it never claims otherwise: close the tab and
+          monitoring stops. It starts only when you arm it, and never resumes by itself after a
+          reload, so coverage is always something you chose rather than something assumed.
+        </p>
+        <dl className="about-facts">
+          <div>
+            <dt>Version</dt>
+            <dd>{__ACKWATCH_VERSION__}</dd>
+          </div>
+          <div>
+            <dt>License</dt>
+            <dd>Apache 2.0</dd>
+          </div>
+        </dl>
+        <p className="field-help">
+          Independent open-source project, not endorsed by The Matrix.org Foundation or Element.
+        </p>
+      </section>
+    </div>
+  );
+}
+
+/**
+ * Which of the four startup phases the client is in, and what to call it.
+ *
+ * Deliberately not a percentage. Matrix never tells a client how much of an initial sync is left,
+ * so any "60%" would be invented and would stall at whatever number the fiction reached. These are
+ * phases the client genuinely passes through, in order, and the fourth is the one that matters:
+ * only then can monitoring be armed.
+ */
+function startupStage(snapshot: AppSnapshot): { readonly step: number; readonly label: string } {
+  switch (snapshot.coverage.connection) {
+    case 'starting':
+      return { step: 1, label: 'Restoring local data' };
+    case 'cache_restored':
+      return {
+        step: 2,
+        label:
+          snapshot.crypto.state === 'initializing' ? 'Preparing encryption' : 'Local data ready',
+      };
+    case 'baseline_syncing':
+      return { step: 3, label: 'Confirming coverage' };
+    case 'ready':
+      return { step: 4, label: 'Ready' };
+    default:
+      // Reconnecting, catching up, recovering a gap: no longer starting up, so the coverage label
+      // is the honest thing to show rather than a step in a sequence already completed.
+      return { step: 0, label: coverageLabels[snapshot.coverage.connection] };
+  }
+}
+
+/**
+ * Session state and its controls, carried in the top bar.
+ *
+ * It lives beside the wordmark rather than in a panel of its own because it is a status line, not
+ * a section: one short phrase and the two buttons that act on it.
+ */
+function SessionBar({
+  snapshot,
+  controller,
+}: {
+  readonly snapshot: AppSnapshot;
+  readonly controller: AckWatchControllerPort | undefined;
+}) {
+  const blocked = snapshot.phase === 'blocked';
+  const armed = snapshot.coverage.monitoring === 'armed';
+  const stage = startupStage(snapshot);
+  const status = blocked
+    ? 'Second tab blocked'
+    : armed
+      ? 'Monitoring armed'
+      : stage.step === 4
+        ? 'Ready'
+        : stage.step === 0
+          ? stage.label
+          : `Step ${stage.step} of 4 · ${stage.label}`;
+  const tone = blocked
+    ? 'danger'
+    : armed || stage.step === 4
+      ? 'healthy'
+      : coverageTone(snapshot.coverage.connection);
+
+  return (
+    <div className="session-bar">
+      <span
+        className={`session-bar__status session-bar__status--${tone}`}
+        role="status"
+        title={
+          stage.step === 3
+            ? 'A first sign-in reads every room you have joined, so this is the slow phase. Nothing is missed while it runs: monitoring only starts once you arm it.'
+            : undefined
+        }
+      >
+        {status}
+      </span>
+      {blocked ? null : (
+        <button
+          className={`session-bar__button${armed ? ' button-secondary' : ''}`}
+          type="button"
+          disabled={!armed && snapshot.coverage.connection !== 'ready'}
+          onClick={() => (armed ? controller?.stopMonitoring() : controller?.startMonitoring())}
+        >
+          {armed ? 'Stop monitoring' : 'Start monitoring'}
+        </button>
+      )}
+      {!blocked && snapshot.session.state === 'active' ? (
+        <button
+          className="session-bar__button button-secondary"
+          type="button"
+          onClick={() => void controller?.endSession()}
+        >
+          End session
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Configuration, kept off the board.
+ *
+ * Everything here is set once or occasionally — alert delivery, device durability, encryption keys,
+ * data export — and none of it is work that arrived thirty seconds ago. Sharing a page with the
+ * queue meant a one-time decision competed for attention with the thing the product exists to show.
+ *
+ * Deliberately excluded: exhausted alert deliveries, which look like configuration and are not.
+ * A failed delivery is a decision waiting on the operator, so it stays on the board.
+ */
+function SettingsView({
+  snapshot,
+  controller,
+  close,
+}: {
+  readonly snapshot: AppSnapshot;
+  readonly controller: AckWatchControllerPort | undefined;
+  readonly close: () => void;
+}) {
+  const [settingsTransfer, setSettingsTransfer] = useState('');
+  // The transfer box is shared between settings and diagnostics, so it tracks which it is holding.
+  const [transferKind, setTransferKind] = useState<'settings' | 'diagnostics'>('settings');
+  const [settingsStatus, setSettingsStatus] = useState('');
+  // Clearing is irreversible, so the control asks a second time rather than acting on one click.
+  const [clearArmed, setClearArmed] = useState(false);
+
+  return (
+    <main className="settings-view">
+      <div className="settings-view__header">
+        <div>
+          <p className="eyebrow">Settings</p>
+          <h1>Alerts, this device, and your data</h1>
+        </div>
+        <button type="button" className="topbar__about" onClick={close}>
+          Back to the board
+        </button>
+      </div>
+      <CryptoSecurityPanel snapshot={snapshot} controller={controller} />
+
+      <AlertSettingsPanel snapshot={snapshot} controller={controller} />
+
+      <section className="storage-card" aria-labelledby="storage-heading">
+        <div>
+          <p className="eyebrow">Local durability</p>
+          <h2 id="storage-heading">
+            {snapshot.storage.persistent
+              ? 'Persistent local storage enabled'
+              : 'Reduce browser eviction risk'}
+          </h2>
+          <p>
+            Your queue is stored locally in IndexedDB. Browser storage is not a confidentiality
+            boundary and can still be cleared explicitly.
+          </p>
+        </div>
+        <div className="storage-card__actions">
+          {snapshot.storage.persistenceSupported && !snapshot.storage.persistent ? (
+            <button type="button" onClick={() => void controller?.requestPersistentStorage()}>
+              Request persistent storage
+            </button>
+          ) : null}
+          <p className="field-help">
+            <strong>Clear stored data</strong> erases everything this account holds on this device —
+            queue items and their activity history, alert effects, deliveries and attempts,
+            monitoring sessions, ingestion issues, quarantined records, <em>and your settings</em>,
+            including the webhook configuration. It does not touch anything on Matrix. Ending a
+            session clears the work but keeps your settings; this does not. Export first if you want
+            to restore them.
+          </p>
+          <details>
+            <summary>Settings export/import</summary>
+            <label htmlFor="settings-transfer">
+              {transferKind === 'diagnostics'
+                ? 'Diagnostics report (read-only; replace it with settings JSON to import)'
+                : 'Settings JSON'}
+            </label>
+            <textarea
+              id="settings-transfer"
+              value={settingsTransfer}
+              onChange={(event) => {
+                setSettingsTransfer(event.target.value);
+                setTransferKind('settings');
+              }}
+              rows={5}
+            />
+            <div>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => {
+                  void controller?.exportSettings().then((value) => {
+                    if (value) setSettingsTransfer(value);
+                    setSettingsStatus(
+                      value ? 'Settings prepared for copy.' : 'No settings available.',
+                    );
+                  });
+                }}
+              >
+                Export settings
+              </button>
+              <button
+                type="button"
+                className="button-secondary"
+                disabled={!settingsTransfer}
+                onClick={() => {
+                  void controller?.importSettings(settingsTransfer).then(
+                    () => setSettingsStatus('Settings imported.'),
+                    () => setSettingsStatus('Settings import failed validation.'),
+                  );
+                }}
+              >
+                Import settings
+              </button>
+            </div>
+            <p aria-live="polite">{settingsStatus}</p>
+          </details>
+          <details>
+            <summary>Diagnostics and cleanup</summary>
+            <p className="storage-card__note">
+              A diagnostics report describes how this installation is behaving using counts, codes
+              and timings only. It carries no message text, room or event identifiers, senders, or
+              webhook destination, so it is safe to attach to a bug report.
+            </p>
+            <div>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => {
+                  void controller?.exportDiagnostics().then((value) => {
+                    if (value) {
+                      setSettingsTransfer(value);
+                      setTransferKind('diagnostics');
+                    }
+                    setSettingsStatus(
+                      value ? 'Diagnostics report prepared for copy.' : 'No diagnostics available.',
+                    );
+                  });
+                }}
+              >
+                Export diagnostics
+              </button>
+              <button
+                type="button"
+                className="button-danger"
+                onClick={() => {
+                  if (clearArmed) {
+                    void controller?.clearStoredData().then(() => {
+                      setClearArmed(false);
+                      setSettingsStatus('Stored data for this account was cleared.');
+                    });
+                    return;
+                  }
+                  setClearArmed(true);
+                  setSettingsStatus(
+                    'This permanently deletes this account\u2019s queue, history and settings. Press again to confirm.',
+                  );
+                }}
+              >
+                {clearArmed ? 'Confirm clear' : 'Clear stored data'}
+              </button>
+            </div>
+          </details>
+        </div>
+      </section>
+    </main>
+  );
+}
+
 export function App({ controller, snapshot: suppliedSnapshot, view = signedOutView }: AppProps) {
   const fallbackSnapshot = useMemo(
     () => suppliedSnapshot ?? snapshotFromView(view),
@@ -963,18 +1574,25 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
     : 'Not yet confirmed';
   const lastProcessedEventId = snapshot.ingestionDecisions.at(-1)?.eventId;
   const [selectedItemId, setSelectedItemId] = useState<string>();
-  const [settingsTransfer, setSettingsTransfer] = useState('');
-  const [settingsStatus, setSettingsStatus] = useState('');
-  // Clearing is irreversible, so the control asks a second time rather than acting on one click.
-  const [clearArmed, setClearArmed] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  // A hash route rather than a toggle, so the back button leaves settings and a link can point at
+  // them. The app is a static bundle, so a path-based router would need server rewrites.
+  const [onSettings, setOnSettings] = useState(() => globalThis.location?.hash === '#/settings');
+  useEffect(() => {
+    const sync = () => setOnSettings(globalThis.location?.hash === '#/settings');
+    window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
   const selectedItem = snapshot.queueItems.find(({ id }) => id === selectedItemId);
-  const attentionItems = snapshot.queueItems.filter(
-    (item) => item.status !== 'COMPLETED' && item.needsAttention,
-  );
-  const openItems = snapshot.queueItems.filter(
-    (item) => item.status !== 'COMPLETED' && !item.needsAttention,
-  );
-  const completedItems = snapshot.queueItems.filter((item) => item.status === 'COMPLETED');
+  const attentionItems = snapshot.queueItems
+    .filter((item) => item.status !== 'COMPLETED' && item.needsAttention)
+    .sort(compareByOldestDetected);
+  const openItems = snapshot.queueItems
+    .filter((item) => item.status !== 'COMPLETED' && !item.needsAttention)
+    .sort(compareByOldestAcknowledged);
+  const completedItems = snapshot.queueItems
+    .filter((item) => item.status === 'COMPLETED')
+    .sort(compareByMostRecentlyCompleted);
   // Stable across renders, so a memoized card is not re-rendered by a fresh callback identity.
   // It reads the queue through the controller rather than closing over `snapshot`, because a
   // callback that captured the snapshot would either go stale or change identity every render.
@@ -991,21 +1609,37 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
     <div className="app-shell">
       <header className="topbar">
         <Wordmark />
-        <p className="topbar__descriptor">A local-first attention monitor for Matrix</p>
-        {isSignedIn ? (
-          <button
-            className="topbar__action"
-            type="button"
-            onClick={() => void controller?.logout()}
-          >
-            Sign out
+        {isSignedIn ? <SessionBar snapshot={snapshot} controller={controller} /> : <span />}
+        <div className="topbar__actions">
+          {isSignedIn ? (
+            <button
+              className="topbar__about"
+              type="button"
+              onClick={() => {
+                globalThis.location.hash = onSettings ? '' : '#/settings';
+              }}
+            >
+              {onSettings ? 'Board' : 'Settings'}
+            </button>
+          ) : null}
+          <button className="topbar__about" type="button" onClick={() => setAboutOpen(true)}>
+            About
           </button>
-        ) : (
-          <button className="icon-button" type="button" aria-label="Open settings" disabled>
-            <span aria-hidden="true">•••</span>
-          </button>
-        )}
+          {isSignedIn ? (
+            <button
+              className="topbar__action"
+              type="button"
+              onClick={() => void controller?.logout()}
+            >
+              Sign out
+            </button>
+          ) : null}
+        </div>
       </header>
+
+      {isSignedIn && !onSettings ? (
+        <ExhaustedDeliveries deliveries={snapshot.alertDeliveries ?? []} controller={controller} />
+      ) : null}
 
       <section className="health-strip" aria-label="Monitoring health">
         <div className="health-strip__identity">
@@ -1032,8 +1666,22 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
             </dd>
           </div>
           <div>
-            <dt>Last confirmed</dt>
-            <dd className="health-grid__time">{lastConfirmed}</dd>
+            <dt>Session</dt>
+            <dd className="health-grid__time health-grid__stack">
+              <span>
+                <span className="health-grid__label">Started</span>{' '}
+                {snapshot.session.startedAt === undefined ? (
+                  'None'
+                ) : (
+                  <time dateTime={new Date(snapshot.session.startedAt).toISOString()}>
+                    {formatTimestamp(snapshot.session.startedAt)}
+                  </time>
+                )}
+              </span>
+              <span>
+                <span className="health-grid__label">Confirmed</span> {lastConfirmed}
+              </span>
+            </dd>
           </div>
           <div>
             <dt>Storage</dt>
@@ -1143,267 +1791,71 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
         </section>
       ) : null}
 
-      <main>
-        <section className="hero" aria-labelledby="hero-title">
-          <div className="hero__copy">
-            <p className="eyebrow">Coverage you can trust</p>
-            <h1 id="hero-title">
-              Important messages,
-              <br />
-              watched until done.
-            </h1>
-            <p className="hero__lede">
-              AckWatch turns incoming Matrix activity into a durable attention queue—without
-              pretending the browser can watch while it is closed.
-            </p>
+      {onSettings && isSignedIn ? (
+        <SettingsView
+          snapshot={snapshot}
+          controller={controller}
+          close={() => {
+            globalThis.location.hash = '';
+          }}
+        />
+      ) : (
+        <main>
+          {!isSignedIn && snapshot.phase !== 'blocked' ? (
+            <section className="hero" aria-label="Sign in">
+              <div className="hero__copy">
+                <LoginPanel snapshot={snapshot} controller={controller} />
+              </div>
+            </section>
+          ) : null}
 
-            {!isSignedIn && snapshot.phase !== 'blocked' ? (
-              <LoginPanel snapshot={snapshot} controller={controller} />
-            ) : (
-              <section className="session-card" aria-labelledby="session-heading">
-                <div>
-                  <p className="eyebrow">Session control</p>
-                  <h2 id="session-heading">
-                    {snapshot.phase === 'blocked'
-                      ? 'Second tab blocked'
-                      : snapshot.coverage.monitoring === 'armed'
-                        ? 'Monitoring is armed'
-                        : connection === 'ready'
-                          ? 'Ready when you are'
-                          : 'Establishing coverage'}
-                  </h2>
-                  <p>
-                    {connection === 'ready'
-                      ? 'Network baseline confirmed and the ingestion queue is clear.'
-                      : connection === 'coverage_incomplete'
-                        ? 'Retry recovery before treating this monitoring interval as complete.'
-                        : snapshot.coverage.monitoring === 'armed'
-                          ? 'Monitoring intent is retained, but coverage is temporarily degraded.'
-                          : 'Start remains unavailable until a fresh network sync is fully processed.'}
-                  </p>
-                </div>
-                {snapshot.phase !== 'blocked' ? (
-                  <button
-                    className={snapshot.coverage.monitoring === 'armed' ? 'button-secondary' : ''}
-                    type="button"
-                    disabled={
-                      snapshot.coverage.monitoring === 'off' &&
-                      snapshot.coverage.connection !== 'ready'
-                    }
-                    onClick={() =>
-                      snapshot.coverage.monitoring === 'armed'
-                        ? controller?.stopMonitoring()
-                        : controller?.startMonitoring()
-                    }
-                  >
-                    {snapshot.coverage.monitoring === 'armed'
-                      ? 'Stop monitoring'
-                      : 'Start monitoring'}
-                  </button>
-                ) : null}
-                {snapshot.phase !== 'blocked' && snapshot.session.state === 'active' ? (
-                  <button
-                    className="button-secondary"
-                    type="button"
-                    onClick={() => void controller?.endSession()}
-                  >
-                    End session
-                  </button>
-                ) : null}
-              </section>
-            )}
-          </div>
-
-          <aside className="promise-card" aria-label="How AckWatch works">
-            <div className="promise-card__signal" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-              <span />
-            </div>
-            <p className="eyebrow">The promise</p>
-            <ol>
-              <li>
-                <span>01</span>
-                <p>
-                  <strong>Confirm the baseline</strong>
-                  <small>Historical noise stays out of your queue.</small>
-                </p>
-              </li>
-              <li>
-                <span>02</span>
-                <p>
-                  <strong>Arm intentionally</strong>
-                  <small>You decide exactly when coverage starts.</small>
-                </p>
-              </li>
-              <li>
-                <span>03</span>
-                <p>
-                  <strong>Recover honestly</strong>
-                  <small>A failed gap can never look healthy.</small>
-                </p>
-              </li>
-            </ol>
-          </aside>
-        </section>
-
-        <section
-          className="queue-preview workflow-board"
-          aria-labelledby="workflow-heading"
-          data-last-processed-event-id={lastProcessedEventId}
-        >
-          <header className="workflow-board__heading">
-            <div>
-              <p className="eyebrow">Durable workflow</p>
-              <h2 id="workflow-heading">Attention queue</h2>
-            </div>
-            <p aria-live="polite">
-              {snapshot.queueItems.length === 0
-                ? healthy
-                  ? 'Coverage is healthy. New qualifying activity will appear here.'
-                  : 'Arm monitoring after the network baseline to accept new work.'
-                : `${attentionItems.length} need attention · ${openItems.length} open · ${completedItems.length} completed`}
-            </p>
-          </header>
-          <div className="workflow-columns">
-            <QueueSection
-              title="Needs attention"
-              empty="No unseen or reopened work."
-              items={attentionItems}
-              controller={controller}
-              openDetails={openDetails}
-            />
-            <QueueSection
-              title="Open work"
-              empty="Viewed and acknowledged work appears here."
-              items={openItems}
-              controller={controller}
-              openDetails={openDetails}
-            />
-            <QueueSection
-              title="Completed history"
-              empty="Completed work remains here until explicit cleanup."
-              items={completedItems}
-              controller={controller}
-              openDetails={openDetails}
-            />
-          </div>
-        </section>
-
-        {isSignedIn ? <CryptoSecurityPanel snapshot={snapshot} controller={controller} /> : null}
-
-        {isSignedIn ? <AlertSettingsPanel snapshot={snapshot} controller={controller} /> : null}
-
-        {isSignedIn ? (
-          <section className="storage-card" aria-labelledby="storage-heading">
-            <div>
-              <p className="eyebrow">Local durability</p>
-              <h2 id="storage-heading">
-                {snapshot.storage.persistent
-                  ? 'Persistent local storage enabled'
-                  : 'Reduce browser eviction risk'}
-              </h2>
-              <p>
-                Your queue is stored locally in IndexedDB. Browser storage is not a confidentiality
-                boundary and can still be cleared explicitly.
+          <section
+            className="queue-preview workflow-board"
+            aria-labelledby="workflow-heading"
+            data-last-processed-event-id={lastProcessedEventId}
+          >
+            <header className="workflow-board__heading">
+              <div>
+                <p className="eyebrow">Durable workflow</p>
+                <h2 id="workflow-heading">Attention queue</h2>
+              </div>
+              <p aria-live="polite">
+                {snapshot.queueItems.length === 0
+                  ? healthy
+                    ? 'Coverage is healthy. New qualifying activity will appear here.'
+                    : 'Arm monitoring after the network baseline to accept new work.'
+                  : `${attentionItems.length} need attention · ${openItems.length} open · ${completedItems.length} completed`}
               </p>
-            </div>
-            <div className="storage-card__actions">
-              {snapshot.storage.persistenceSupported && !snapshot.storage.persistent ? (
-                <button type="button" onClick={() => void controller?.requestPersistentStorage()}>
-                  Request persistent storage
-                </button>
-              ) : null}
-              <details>
-                <summary>Settings export/import</summary>
-                <label htmlFor="settings-transfer">Settings JSON</label>
-                <textarea
-                  id="settings-transfer"
-                  value={settingsTransfer}
-                  onChange={(event) => setSettingsTransfer(event.target.value)}
-                  rows={5}
-                />
-                <div>
-                  <button
-                    type="button"
-                    className="button-secondary"
-                    onClick={() => {
-                      void controller?.exportSettings().then((value) => {
-                        if (value) setSettingsTransfer(value);
-                        setSettingsStatus(
-                          value ? 'Settings prepared for copy.' : 'No settings available.',
-                        );
-                      });
-                    }}
-                  >
-                    Export settings
-                  </button>
-                  <button
-                    type="button"
-                    className="button-secondary"
-                    disabled={!settingsTransfer}
-                    onClick={() => {
-                      void controller?.importSettings(settingsTransfer).then(
-                        () => setSettingsStatus('Settings imported.'),
-                        () => setSettingsStatus('Settings import failed validation.'),
-                      );
-                    }}
-                  >
-                    Import settings
-                  </button>
-                </div>
-                <p aria-live="polite">{settingsStatus}</p>
-              </details>
-              <details>
-                <summary>Diagnostics and cleanup</summary>
-                <p className="storage-card__note">
-                  A diagnostics report describes how this installation is behaving using counts,
-                  codes and timings only. It carries no message text, room or event identifiers,
-                  senders, or webhook destination, so it is safe to attach to a bug report.
-                </p>
-                <div>
-                  <button
-                    type="button"
-                    className="button-secondary"
-                    onClick={() => {
-                      void controller?.exportDiagnostics().then((value) => {
-                        if (value) setSettingsTransfer(value);
-                        setSettingsStatus(
-                          value
-                            ? 'Diagnostics report prepared for copy.'
-                            : 'No diagnostics available.',
-                        );
-                      });
-                    }}
-                  >
-                    Export diagnostics
-                  </button>
-                  <button
-                    type="button"
-                    className="button-danger"
-                    onClick={() => {
-                      if (clearArmed) {
-                        void controller?.clearStoredData().then(() => {
-                          setClearArmed(false);
-                          setSettingsStatus('Stored data for this account was cleared.');
-                        });
-                        return;
-                      }
-                      setClearArmed(true);
-                      setSettingsStatus(
-                        'This permanently deletes this account\u2019s queue, history and settings. Press again to confirm.',
-                      );
-                    }}
-                  >
-                    {clearArmed ? 'Confirm clear' : 'Clear stored data'}
-                  </button>
-                </div>
-              </details>
+            </header>
+            <div className="workflow-columns">
+              <QueueSection
+                title="Needs attention"
+                empty="No unseen or reopened work."
+                items={attentionItems}
+                controller={controller}
+                openDetails={openDetails}
+              />
+              <QueueSection
+                title="Open work"
+                empty="Viewed and acknowledged work appears here."
+                items={openItems}
+                controller={controller}
+                openDetails={openDetails}
+              />
+              <QueueSection
+                title="Completed history"
+                empty="Completed work remains here until explicit cleanup."
+                items={completedItems}
+                controller={controller}
+                openDetails={openDetails}
+                searchable
+              />
             </div>
           </section>
-        ) : null}
-      </main>
+
+          {/* Configuration lives on the settings route; this page is for work that needs attention. */}
+        </main>
+      )}
 
       {selectedItem ? (
         <ItemDetail
@@ -1414,10 +1866,7 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
         />
       ) : null}
 
-      <footer>
-        <p>Independent open-source software. Not endorsed by The Matrix.org Foundation.</p>
-        <p>Local-first · No telemetry · Apache-2.0</p>
-      </footer>
+      {aboutOpen ? <AboutPanel close={() => setAboutOpen(false)} /> : null}
     </div>
   );
 }

@@ -5,7 +5,9 @@ for (const mountPath of ['/', '/ackwatch/']) {
     await page.goto(mountPath);
 
     await expect(page).toHaveTitle('AckWatch');
-    await expect(page.getByRole('heading', { name: /important messages/i })).toBeVisible();
+    // Anchored on the sign-in field rather than marketing copy: it proves React mounted and
+    // rendered interactive UI, and it does not have to be revisited every time wording changes.
+    await expect(page.getByLabel(/matrix user id/i)).toBeVisible();
     await expect(page.getByLabel('Monitoring health')).toContainText('Signed out');
 
     const resourceFailures = await page.locator('body').evaluate(() =>

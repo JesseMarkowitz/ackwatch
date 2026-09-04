@@ -385,6 +385,72 @@ Everything else in Phase 5 is delivered and green under `npm run check:gate4`. W
 
 **Closed 2026-09-03: per-event cost at the stress ceiling.** 64 ms against a 50 ms target at 10,000 activities / 1,000 items is accepted for V1. Every other target is met at that ceiling, and every target including this one is met at a realistic session size (2,000 / 200). Closing the gap means incremental item maintenance, whose failure mode is stale or duplicated items after a thread merge deletes one — a correctness risk not worth taking on for a cost that appears only at five times realistic load. The number is recorded as an accepted deviation by the Gate 5 report rather than hidden by a loosened threshold, and stated in `RELEASE_NOTES.md`.
 
+### 8.3e Pre-release items from live testing (2026-09-04)
+
+1. **Audio alerts have never been heard.** The developer confirmed system audio works on the test
+   machine, so this is browser or profile configuration rather than the VM, and troubleshooting is
+   deferred to a real deployment. The underlying defect is already identified and is not a
+   configuration problem: `AudioAlertTransport.prepare()` unlocks by playing the tone **muted**, and
+   browsers permit muted playback unconditionally, so the check passes whether or not sound is
+   possible and the indicator reads `Ready` regardless. A **Test alert tone** control now plays the
+   real tone at the configured volume inside the click that requested it, which is the one context
+   where a browser will allow sound; whether that produces audio is the diagnostic. Readiness should
+   not claim more than it has established before release.
+
+2. **No layout has been reviewed below a large desktop.** All live testing has run on one wide
+   monitor. The visual catalog renders a desktop and a narrow viewport, but nobody has looked at the
+   result on a real phone or a small laptop, and the item detail dialog in particular spends a lot of
+   vertical space on its header — affordable at 1440px, possibly not at 800. Review every screen at
+   a range of widths, and decide what the product actually claims about mobile, before release.
+
+3. **Configuration belongs off the monitoring board.** Local durability, webhook relay, settings
+   export/import, diagnostics export, clear stored data, and durable device security are all
+   one-time or occasional setup, and they currently sit on the page whose job is showing work that
+   needs attention. Moving them behind a settings route is agreed in principle; the split and the
+   navigation are undecided.
+
+### 8.3d Open product questions raised in live testing (2026-09-04)
+
+Both were found by driving the application against a real homeserver. Neither is a defect: each is a
+decision that must be taken before the first release, and each amends a stated requirement rather
+than filling a gap.
+
+**1. Reactions do not alert, and should.** Only `m.room.message` and `m.room.encrypted` are ingested;
+everything else is recorded as `unsupported_event_type`. **EVT-009** requires reactions to be
+"intentionally ignored", and §81 lists "reactions as work" as an explicit non-goal — so alerting on
+them is a specification change, not a bug fix.
+
+The difficulty is that the case the developer cares about is a reaction to **their own** message,
+and their own messages never create queue items, because self-authored activity is excluded. That
+exclusion is what makes the direct-message behaviour correct today. Three shapes were identified:
+
+1. _Reactions to others' messages only._ Attaches to an item that already exists, so it is a small
+   change — and it misses the case that prompted the request.
+2. _Track own messages as latent items_ that surface only when reacted to. Delivers what was asked
+   for, weakens self-authored exclusion, and needs a rule for when a latent item expires.
+3. _A separate "responses to you" channel_, distinct from the attention queue. Cleanest
+   conceptually, largest change.
+
+Whichever is chosen must amend EVT-009 and §81 explicitly rather than letting them drift.
+
+**1b. Self-authored messages are dropped at ingestion, so the detail view shows half a
+conversation.** A message from the operator is discarded as `self_authored` and never stored, which
+is correct for alerting — you should not be alerted about your own words — but it also means the
+item's history omits your side entirely. For a thread you took part in, the record you consult is
+partial. It has a second consequence: replying in another Matrix client does not settle the item,
+because AckWatch cannot see that you replied, so the work stays in the queue until you acknowledge
+it by hand. That may well be right for a product built on explicit acknowledgement, but it should be
+a decision rather than a side effect. Recording own messages as context without alerting on them
+shares a root with the reactions question above: both require tracking the operator's own messages,
+and neither should be decided alone.
+
+**2. Mentions and direct messages are addressed to a person, not a room, and rank the same as
+anything else.** A message that names the operator, or arrives in a two-person room, is a request
+directed at them; a message in a busy room may be addressed to nobody in particular. The queue
+currently cannot tell these apart, so a direct request sorts beside ambient traffic. What "extra
+priority" should mean — ordering, a distinct deadline, a louder alert, a separate section, or some
+combination — is undecided, as is whether a room's member count is a sound proxy for "direct".
+
 ### 8.3c Soak and Gate 5 tooling (2026-09-03)
 
 - **The soak now acknowledges.** `Acknowledge` is rendered only inside the item detail dialog, never on a queue card, so the controller's top-level lookup for it matched nothing and the count stayed at zero — which in turn made `acknowledged % 3 === 0` permanently true and completed an item on every pass. The controller now opens an item the way an operator does, and completion is edge-triggered on an acknowledgement rather than level-tested on the running total. Queue cards carry `data-status` so the harness can select a genuinely pending item instead of guessing.

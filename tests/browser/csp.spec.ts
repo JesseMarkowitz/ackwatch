@@ -25,7 +25,9 @@ test('the documented Content Security Policy admits the production application',
   });
 
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: /important messages/i })).toBeVisible();
+  // Anchored on the sign-in field rather than marketing copy, so this asserts that the policy let
+  // the application boot and render rather than that a particular sentence survived.
+  await expect(page.getByLabel(/matrix user id/i)).toBeVisible();
 
   // Exercise the parts a naive policy breaks: IndexedDB, a data: media source, and WebAssembly.
   const capabilities = await page.evaluate(async () => {

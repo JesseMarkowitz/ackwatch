@@ -11,6 +11,8 @@ import {
 const payload: GenericAlertPayload = {
   schema: 'ackwatch.alert.v1',
   effectId: 'effect',
+  reference: 'ref12345',
+  lastActivityAt: 1_000,
   eventKind: 'new_activity',
   detectedAt: 1,
   evaluatedAt: 1,
@@ -66,7 +68,7 @@ describe('local alert transports', () => {
 
     expect(shown).toEqual([
       expect.objectContaining({
-        title: 'AckWatch attention required',
+        title: 'AckWatch: attention required',
         options: expect.objectContaining({ tag: 'ackwatch:effect' }),
       }),
     ]);

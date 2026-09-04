@@ -62,7 +62,26 @@ describe('normalization', () => {
     );
 
     expect(result.kind).toBe('activity');
-    if (result.kind === 'activity') expect(Array.from(result.preview)).toHaveLength(160);
+    if (result.kind === 'activity') {
+      // 160 code points of content plus the marker that says content was removed. Counting code
+      // points rather than UTF-16 units is the point: 160 emoji are 320 units.
+      expect(Array.from(result.preview)).toHaveLength(161);
+      expect(result.preview.endsWith('…')).toBe(true);
+      expect(Array.from(result.preview.slice(0, -1))).toHaveLength(160);
+    }
+  });
+
+  it('leaves a message that fits the bound unmarked', () => {
+    const body = 'Short enough to keep whole.';
+    const result = normalizeEnvelope(
+      envelope({ event: { ...envelope().event, content: { msgtype: 'm.text', body } } }),
+      '@monitor:example.test',
+    );
+
+    expect(result.kind).toBe('activity');
+    // A reader must be able to tell a bounded preview from a complete message, so the marker
+    // appears only when text was actually dropped.
+    if (result.kind === 'activity') expect(result.preview).toBe(body);
   });
 
   it('turns malformed events into issues and encrypted events into durable placeholders', () => {

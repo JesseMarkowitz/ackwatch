@@ -18,6 +18,7 @@ import {
   type QueueSettings,
   type WorkflowTransition,
 } from '../../domain/queue';
+import { PREVIEW_CHARACTER_LIMIT } from '../../domain/ingestion';
 import {
   defaultSessionContinuityWindowMs,
   WorkflowDatabase,
@@ -74,7 +75,11 @@ const activitySchema: z.ZodType<QueueActivity> = z.object({
   sender: z.string().startsWith('@'),
   eventType: z.string().min(1),
   messageType: z.string().min(1),
-  preview: z.string().max(160),
+  // The bound is a character count, but zod measures UTF-16 units: 160 code points of astral text
+  // (emoji) is 320 units, and a message like that used to fail validation and be quarantined —
+  // silent loss for the sender. The stored limit is enforced where the preview is built; this is a
+  // sanity ceiling wide enough for the worst case plus the truncation marker.
+  preview: z.string().max(PREVIEW_CHARACTER_LIMIT * 2 + 1),
   detectedAt: z.number().int().nonnegative(),
   localSequence: z.number().int().nonnegative(),
   provenance: z.string().min(1),
@@ -82,8 +87,11 @@ const activitySchema: z.ZodType<QueueActivity> = z.object({
   decryptionFailureCode: z.string().min(1).optional(),
   media: z
     .object({
-      name: z.string().max(160),
-      mimeType: z.string().max(160).optional(),
+      name: z.string().max(PREVIEW_CHARACTER_LIMIT * 2 + 1),
+      mimeType: z
+        .string()
+        .max(PREVIEW_CHARACTER_LIMIT * 2 + 1)
+        .optional(),
       size: z.number().int().nonnegative().optional(),
       width: z.number().int().nonnegative().optional(),
       height: z.number().int().nonnegative().optional(),
@@ -131,7 +139,11 @@ const deliverySchema: z.ZodType<AlertDeliveryRecord> = z.object({
   effectId: z.string().min(1),
   itemId: z.string().min(1),
   transport: z.enum(['audio', 'browser_notification', 'webhook']),
-  status: z.enum(['pending', 'delivering', 'delivered', 'exhausted']),
+  // `dismissed` is an exhausted delivery the operator has decided not to act on. It is a new
+  // terminal state rather than a deletion: this application's premise is that coverage failures
+  // stay honest, so a failure that happened is not erased, it stops asking for a decision. The
+  // projection selects on `exhausted`, so a dismissed row leaves the actionable list by itself.
+  status: z.enum(['pending', 'delivering', 'delivered', 'exhausted', 'dismissed']),
   attemptCount: z.number().int().nonnegative(),
   nextAttemptAt: z.number().int().nonnegative(),
   leaseUntil: z.number().int().nonnegative().optional(),
@@ -850,6 +862,21 @@ export class WorkflowRepository {
         await this.database.alertEffects.update(existing.effectId, { status: 'pending' });
       },
     );
+  }
+
+  public async dismissAlertDelivery(
+    accountId: string,
+    deliveryId: string,
+    now: number,
+  ): Promise<void> {
+    const existing = this.parseOwnedDelivery(
+      accountId,
+      await this.database.alertDeliveries.get(deliveryId),
+    );
+    if (!existing || existing.status !== 'exhausted') {
+      throw new Error('Only an exhausted alert delivery can be dismissed.');
+    }
+    await this.database.alertDeliveries.update(deliveryId, { status: 'dismissed', updatedAt: now });
   }
 
   public async applyMaintenance(

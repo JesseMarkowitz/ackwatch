@@ -518,6 +518,46 @@ export function evaluateDeadlines(item: QueueItem, now: number): readonly AlertE
   ];
 }
 
+/**
+ * Each column answers a different question, so each has its own order.
+ *
+ * `compareQueueItems` still governs storage order and stays newest-first, because that is what a
+ * projection wants. What a person wants from a work queue is the opposite.
+ */
+
+/**
+ * Needs attention: oldest request first, by when it first reached you.
+ *
+ * Ranked on `firstDetectedAt`, which later activity never moves — so someone asking again does not
+ * push their own request to the top and bury the person who has been waiting longest. Attention is
+ * not a tiebreaker here: everything in this column needs attention by definition.
+ *
+ * Reopening deliberately resets `firstDetectedAt`, so an item that comes back is new work and
+ * starts its wait again.
+ */
+export function compareByOldestDetected(left: QueueItem, right: QueueItem): number {
+  return left.firstDetectedAt - right.firstDetectedAt || left.id.localeCompare(right.id);
+}
+
+/**
+ * Open work: whatever you have been sitting on longest, by when you acknowledged it.
+ *
+ * Falls back to detection time for an item that reached this column without an acknowledgement
+ * timestamp, so the order is total rather than partly arbitrary.
+ */
+export function compareByOldestAcknowledged(left: QueueItem, right: QueueItem): number {
+  const leftAt = left.acknowledgedAt ?? left.firstDetectedAt;
+  const rightAt = right.acknowledgedAt ?? right.firstDetectedAt;
+  return leftAt - rightAt || left.id.localeCompare(right.id);
+}
+
+/** Completed history: most recently finished first, which is what you look back through. */
+export function compareByMostRecentlyCompleted(left: QueueItem, right: QueueItem): number {
+  const leftAt = left.completedAt ?? left.lastActivityAt;
+  const rightAt = right.completedAt ?? right.lastActivityAt;
+  return rightAt - leftAt || left.id.localeCompare(right.id);
+}
+
 export function compareQueueItems(left: QueueItem, right: QueueItem): number {
   const leftBucket = left.status === 'COMPLETED' ? 1 : 0;
   const rightBucket = right.status === 'COMPLETED' ? 1 : 0;

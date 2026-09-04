@@ -98,7 +98,9 @@ export interface AckWatchControllerPort {
   requestNotificationPermission(): Promise<void>;
   setWebhookToken(token: string): void;
   sendTestWebhook(): Promise<void>;
+  sendTestAudio(): Promise<void>;
   retryAlertDelivery(deliveryId: string): Promise<void>;
+  dismissAlertDelivery(deliveryId: string): Promise<void>;
   resolveEventDetail(roomId: string, eventId: string): Promise<EventDetail>;
   loadItemActivities(itemId: string): Promise<readonly QueueActivity[]>;
   bootstrapCryptoSecurity(password: string, recoveryPassphrase?: string): Promise<string>;
@@ -180,6 +182,7 @@ export interface WorkflowRepositoryPort extends AlertRepositoryPort {
   clearAccount(accountId: string): Promise<void>;
   importSettings(accountId: string, serialized: string): Promise<AccountSettingsRecord>;
   retryAlertDelivery(accountId: string, deliveryId: string, now: number): Promise<void>;
+  dismissAlertDelivery(accountId: string, deliveryId: string, now: number): Promise<void>;
   close(): void;
 }
 
@@ -406,6 +409,20 @@ export class AckWatchController implements AckWatchControllerPort {
 
   public async sendTestWebhook(): Promise<void> {
     await this.alerts?.sendTestWebhook();
+    this.emit();
+  }
+
+  public async sendTestAudio(): Promise<void> {
+    await this.alerts?.sendTestAudio();
+    this.emit();
+  }
+
+  public async dismissAlertDelivery(deliveryId: string): Promise<void> {
+    const accountId = this.credentials?.accountId;
+    if (accountId && this.workflow) {
+      await this.workflow.dismissAlertDelivery(accountId, deliveryId, this.clock.now());
+      await this.refreshWorkflow();
+    }
     this.emit();
   }
 
