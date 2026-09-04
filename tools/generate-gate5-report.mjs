@@ -325,6 +325,7 @@ const report = {
       target: scale.target,
       startupMs: ms(scale.startupMs),
       renderMs: ms(scale.renderMs),
+      rerenderMs: ms(scale.rerenderMs ?? 0),
       commandMs: ms(scale.commandMs),
       schedulerMs: ms(scale.schedulerMs),
       migrationMs: ms(scale.migrationMs),

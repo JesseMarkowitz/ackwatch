@@ -32,7 +32,15 @@ export interface ScaleReport {
   readonly target: { readonly activities: number; readonly items: number };
   readonly samples: readonly PhaseSample[];
   readonly startupMs: number;
+  /** Cold mount of a queue that already holds the target item count. Happens once per page load. */
   readonly renderMs: number;
+  /**
+   * Median cost of the re-render the app performs after every ingested event and every command.
+   * This is the half of per-event UI latency that `commandMs` does not cover: `commandMs` stops at
+   * the projection query, before React runs.
+   */
+  readonly rerenderMs: number;
+  readonly rerenderSamples: readonly number[];
   readonly commandMs: number;
   readonly commandSamples: readonly number[];
   readonly schedulerMs: number;
@@ -267,7 +275,9 @@ export class ScaleBenchmark {
     }
     const schedulerMs = schedulerSamples.at(-1) ?? 0;
 
-    const renderMs = this.measureRender(finalProjection.items);
+    const { mountMs: renderMs, rerenderSamples } = this.measureRender(finalProjection.items);
+    const sortedRerenders = [...rerenderSamples].sort((left, right) => left - right);
+    const rerenderMs = sortedRerenders[Math.floor(sortedRerenders.length / 2)] ?? 0;
     const finalCounts = await countAll(repository.unsafeDatabaseForTests());
     repository.close();
 
@@ -280,6 +290,8 @@ export class ScaleBenchmark {
       samples: [...samples],
       startupMs,
       renderMs,
+      rerenderMs,
+      rerenderSamples,
       commandMs,
       commandSamples,
       schedulerMs,
@@ -323,22 +335,66 @@ export class ScaleBenchmark {
    * synchronously: React 19 commits asynchronously by default, so timing `render()` alone measures
    * scheduling rather than the work, and reports a figure far too good to be true.
    */
-  private measureRender(items: readonly QueueItem[]): number {
+  /**
+   * Measures the two render costs separately, because they answer different questions.
+   *
+   * The mount is what a page load pays once. The re-render is what the app pays after *every*
+   * ingested event and every command, and it is the half of per-event latency that `commandMs`
+   * misses: that measurement stops at the projection query, before React runs.
+   *
+   * The re-render deliberately hands React all-new item objects with one item's content changed.
+   * That is exactly what the app does today — `uiProjection` re-parses every row through zod, so
+   * every object has fresh identity even when its values did not change. Measuring the cheaper
+   * case of stable identities would describe an application that does not exist, and would make
+   * `React.memo` look effective when nothing in the current code would let it hit.
+   */
+  private measureRender(items: readonly QueueItem[]): {
+    mountMs: number;
+    rerenderSamples: number[];
+  } {
     const host = document.createElement('div');
     document.body.append(host);
     this.root = createRoot(host);
-    const started = now();
-    flushSync(() => {
-      this.root?.render(
-        createElement(StrictMode, null, createElement(App, { snapshot: syntheticSnapshot(items) })),
+    const render = (snapshotItems: readonly QueueItem[]) => {
+      flushSync(() => {
+        this.root?.render(
+          createElement(
+            StrictMode,
+            null,
+            createElement(App, { snapshot: syntheticSnapshot(snapshotItems) }),
+          ),
+        );
+      });
+      // Force style and layout so the measurement includes what the browser must do to show it.
+      void host.getBoundingClientRect().height;
+    };
+
+    const mountStarted = now();
+    render(items);
+    const mountMs = now() - mountStarted;
+
+    // Repeated rather than sampled once, for the same reason the command measurement is: the first
+    // pass after a mount pays one-off costs that say nothing about steady-state latency.
+    const rerenderSamples: number[] = [];
+    for (let pass = 0; pass < 6; pass += 1) {
+      const target = items[pass % items.length];
+      const next = items.map((item) =>
+        item === target
+          ? {
+              ...item,
+              unseenActivityCount: item.unseenActivityCount + 1,
+              updatedAt: item.updatedAt + 1,
+            }
+          : { ...item },
       );
-    });
-    // Force style and layout so the measurement includes what the browser must do to show it.
-    void host.getBoundingClientRect().height;
-    const elapsed = now() - started;
+      const started = now();
+      render(next);
+      rerenderSamples.push(now() - started);
+    }
+
     this.root.unmount();
     host.remove();
-    return elapsed;
+    return { mountMs, rerenderSamples };
   }
 
   /**

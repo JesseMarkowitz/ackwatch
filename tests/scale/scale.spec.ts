@@ -113,7 +113,9 @@ test('measures workflow behaviour as the store grows', async ({ page }) => {
     process.stdout.write(
       `  scheduler samples: ${report.schedulerSamples.map((v) => v.toFixed(0)).join(', ')}ms\n` +
         `  command samples: ${report.commandSamples.map((v) => v.toFixed(0)).join(', ')}ms\n` +
-        `  startup ${report.startupMs.toFixed(1)}ms  render ${report.renderMs.toFixed(1)}ms  ` +
+        `  rerender samples: ${report.rerenderSamples.map((v) => v.toFixed(0)).join(', ')}ms\n` +
+        `  startup ${report.startupMs.toFixed(1)}ms  mount ${report.renderMs.toFixed(1)}ms  ` +
+        `rerender ${report.rerenderMs.toFixed(1)}ms  ` +
         `command ${report.commandMs.toFixed(1)}ms  scheduler ${report.schedulerMs.toFixed(1)}ms  ` +
         `migration ${report.migrationMs.toFixed(1)}ms\n`,
     );
@@ -136,6 +138,7 @@ test('measures workflow behaviour as the store grows', async ({ page }) => {
           commandMs: Number(run.commandMs.toFixed(1)),
           schedulerMs: Number(run.schedulerMs.toFixed(1)),
           renderMs: Number(run.renderMs.toFixed(1)),
+          rerenderMs: Number(run.rerenderMs.toFixed(1)),
         })}\n`,
       );
     }
