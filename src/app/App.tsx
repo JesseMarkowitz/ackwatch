@@ -226,7 +226,10 @@ function AlertSettingsPanel({
             const settled = controller?.sendTestAudio() ?? Promise.resolve();
             void Promise.all([
               settled.then(
-                () => setToneStatus('Alert tone played at the configured volume.'),
+                () =>
+                  setToneStatus(
+                    'Alert tone played at the configured volume. If you heard nothing, the browser accepted it and the device silenced it — check the system volume, and on iOS the silent switch.',
+                  ),
                 (error: unknown) =>
                   setToneStatus(
                     `Alert tone failed — ${error instanceof Error ? error.message : String(error)}`,
@@ -241,7 +244,15 @@ function AlertSettingsPanel({
           {playingTone ? 'Playing…' : 'Test alert tone'}
         </button>
         <p className="alert-settings__status" aria-live="polite" role="status">
-          {toneStatus}
+          {/*
+            Standing explanation while the channel is untested, because "Not tested" invites the
+            reasonable assumption that arming tested it. Arming only opens the autoplay gate, with
+            a muted clip that every browser permits.
+          */}
+          {toneStatus ||
+            (snapshot.alerts.audio === 'untested'
+              ? 'Sound has not been confirmed on this device. Arming plays the tone muted, which proves only that playback could start — this test is what tells you whether you will hear an alert.'
+              : '')}
         </p>
         <label>
           <input

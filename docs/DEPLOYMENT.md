@@ -3,6 +3,23 @@
 AckWatch is a static site. It needs no server-side component: the build in `dist/` is
 self-contained and runs from a directory root or a configured subpath.
 
+## HTTPS is required, not recommended
+
+AckWatch must be served from a secure context: HTTPS, or `localhost` during development. This is
+not a hardening preference — four APIs the application depends on are exposed only to secure
+contexts, so on a plain `http://` origin other than localhost it does not work:
+
+- **`navigator.locks`** — the single-instance guard that stops two tabs corrupting one account's
+  store. It is absent, and sign-in fails with `This browser does not support exclusive Web Locks.`
+  This is the first thing an operator hits, and it looks like a browser-support problem rather than
+  a deployment one.
+- **`crypto.subtle`** — secret storage and key backup need it, so encrypted rooms break.
+- **`Notification`** — the notification channel reports itself unsupported.
+- **`navigator.storage`** — persistence cannot be requested, so storage stays best-effort.
+
+Serving the build from a LAN IP over HTTP to try it on another device therefore does not work. Use
+a host that terminates TLS with a certificate the testing devices already trust.
+
 ## Content Security Policy
 
 The policy below is the tightest one the application actually runs under, and the qualification
@@ -20,6 +37,7 @@ style-src 'self';
 font-src 'self' data:;
 img-src 'self' data:;
 media-src data:;
+manifest-src 'self';
 connect-src 'self' https://YOUR-HOMESERVER.example https://YOUR-WEBHOOK.example;
 base-uri 'none';
 form-action 'none';
@@ -33,6 +51,9 @@ Why each non-obvious directive is present:
   rooms cannot be decrypted and monitoring fails at startup. It permits WebAssembly compilation
   only; it does not permit `eval`.
 - `media-src data:` — the bundled alert tone is a `data:` URI, so no audio is fetched from anywhere.
+- `manifest-src 'self'` — the web app manifest is fetched under its own directive, which falls back
+  to `default-src`. Without this line the manifest is blocked and the application is simply not
+  installable, with no visible error on the page.
 - `font-src 'self' data:` — most bundled fonts are files, but two small subsets are inlined into the
   stylesheet as `data:` URIs by the build. Without `data:` those two fail to load.
 - `connect-src` — must list every homeserver origin your users sign in to, plus any webhook
@@ -49,6 +70,51 @@ looks alarming and is not. Zod probes for `Function` availability to decide whet
 JIT-compile validators; the probe is caught and Zod falls back correctly, but the browser reports
 the attempt. AckWatch sets Zod's `jitless` option at startup so the probe never runs, which is what
 Zod documents for this case. Keep `'unsafe-eval'` out of your policy.
+
+## Hosts that cannot set response headers
+
+Some static hosts serve files and offer no way to add a header. Start9 Pages is one: it serves a
+directory out of File Browser or Nextcloud, and there is no header configuration anywhere in it.
+
+On a host like that, set `ACKWATCH_META_CSP` at build time and the policy is emitted into
+`index.html` as a `<meta http-equiv="Content-Security-Policy">` tag instead:
+
+```
+ACKWATCH_META_CSP="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
+font-src 'self' data:; img-src 'self' data:; media-src data:; manifest-src 'self'; \
+connect-src 'self' https://YOUR-HOMESERVER.example; base-uri 'none'; form-action 'none'; \
+object-src 'none'" npm run build
+```
+
+Understand what this costs before relying on it:
+
+- **`frame-ancestors` cannot be delivered this way.** The build drops it, because a browser ignores
+  it in a meta policy and logs an error about it. That directive is the anti-clickjacking control,
+  so on such a host the page can be framed by another site unless the host sends
+  `X-Frame-Options`. Nothing else in the policy is weakened.
+- **The policy applies from when the tag is parsed**, not from the first byte. It is the first
+  element in `<head>`, ahead of every script and stylesheet, so nothing the application loads
+  escapes it — but a header covers the document unconditionally and this does not.
+- **`report-uri` and `sandbox` are dropped for the same reason** and are not used here anyway.
+
+A deployment that sets neither the header nor `ACKWATCH_META_CSP` runs with no policy at all. The
+application behaves identically — no feature depends on the CSP — but a defence-in-depth layer is
+absent, and the deployment is not the configuration this document qualifies. Say so when recording
+such a deployment rather than letting it be assumed.
+
+## Start9 Pages
+
+Pages serves a directory that lives on File Browser's or Nextcloud's volume, mounted read-only, so
+deployment is a file copy:
+
+1. Build, naming your homeserver in the meta policy as above.
+2. Upload the **contents** of `dist/` — not the `dist` folder itself — into a folder in File
+   Browser. `index.html` must sit at that folder's root.
+3. Add a Pages site pointing at that folder, and attach your domain to the site's interface so
+   StartOS issues its certificate.
+
+The build uses relative asset paths and routes with a URL hash, so it needs no rewrite rules and
+works at a domain root or a subpath unchanged.
 
 ## Matrix CORS
 

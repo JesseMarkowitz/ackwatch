@@ -26,6 +26,12 @@ export class AudioAlertTransport implements AlertTransport {
     private readonly createAudio: (source: string) => AudioLike = (source) => new Audio(source),
   ) {}
 
+  /**
+   * Opens the autoplay gate, and establishes nothing about audibility. The clip is played muted,
+   * and browsers permit muted playback unconditionally, so this resolves on a machine where sound
+   * is impossible. Callers must not report a channel as ready on the strength of it; only `send`
+   * plays unmuted.
+   */
   public async prepare(): Promise<void> {
     const audio = this.createAudio(alertTone);
     audio.muted = true;

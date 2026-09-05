@@ -5,6 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#101b1c" />
     <meta name="description" content="AckWatch — a local-first attention monitor for Matrix" />
+    <!--
+      Installable, so the operator can run AckWatch from the home screen at a real device size
+      instead of inside browser chrome. It stays a plain page: there is no service worker, nothing
+      is cached beyond ordinary HTTP, and installing changes no behaviour. Notifications on iOS
+      would additionally require a service worker and `showNotification`, which is a separate
+      decision recorded in the implementation plan and not taken for V1.
+    -->
+    <!--
+      Named .json rather than .webmanifest on purpose: the correct type for .webmanifest is missing
+      from the default MIME table of several static servers, including hosts this is deployed to,
+      and a manifest served as octet-stream is ignored. Every server knows .json.
+    -->
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="AckWatch" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>AckWatch</title>
   </head>
   <body>

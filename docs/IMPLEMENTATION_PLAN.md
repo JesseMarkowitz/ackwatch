@@ -376,8 +376,9 @@ These were decided by the developer during Phase 5 and are normative for the rem
 
 Everything else in Phase 5 is delivered and green under `npm run check:gate4`. What remains:
 
-1. **The six-hour soak run**, scheduled by the developer because it occupies the machine and Docker for the duration. `npm run test:soak`, with `ACKWATCH_SOAK_MINUTES` defaulting to 360. The harness defects that would have made that run worthless are fixed (see §8.3c); it has not been re-smoke-tested since, so run it at three minutes once before committing six hours to it.
-2. **Gates 1–3 still hardcode their step verdicts.** Only the Gate 4 and Gate 5 reports derive them from recorded markers. Retrofitting accepted gates is a developer decision.
+1. **Gates 1–3 still hardcode their step verdicts.** Only the Gate 4 and Gate 5 reports derive them from recorded markers. Retrofitting accepted gates is a developer decision.
+
+**Closed 2026-09-03: the six-hour soak.** Ran for its full 360 minutes with `smokeRun: false`, acknowledging 1,040 of 1,040 items across 23 reconnects with no uncaught page errors. Live timers held flat at 8 and documents at 1; heap, listeners and DOM nodes all grew linearly with retained work and none superlinearly. Gate 5 accepted it as the §8.2 longevity evidence.
 
 **Deferred 2026-09-03 to end-of-project cleanup: the test homeserver's open registration.** The remote homeserver advertises only `m.login.dummy`, so `enable_registration` is on but `registration_requires_token` is not, and anyone can create an account. The developer is still testing against it and is keeping it open deliberately. The remote controller records `registrationTokenRequired` in its manifest, so the state stays visible in the evidence rather than assumed. At project close the homeserver is to be **cleaned out entirely**, not merely tightened.
 
@@ -387,27 +388,15 @@ Everything else in Phase 5 is delivered and green under `npm run check:gate4`. W
 
 ### 8.3e Pre-release items from live testing (2026-09-04)
 
-1. **Audio alerts have never been heard.** The developer confirmed system audio works on the test
-   machine, so this is browser or profile configuration rather than the VM, and troubleshooting is
-   deferred to a real deployment. The underlying defect is already identified and is not a
-   configuration problem: `AudioAlertTransport.prepare()` unlocks by playing the tone **muted**, and
-   browsers permit muted playback unconditionally, so the check passes whether or not sound is
-   possible and the indicator reads `Ready` regardless. A **Test alert tone** control now plays the
-   real tone at the configured volume inside the click that requested it, which is the one context
-   where a browser will allow sound; whether that produces audio is the diagnostic. Readiness should
-   not claim more than it has established before release.
-
-2. **No layout has been reviewed below a large desktop.** All live testing has run on one wide
+1. **No layout has been reviewed below a large desktop.** All live testing has run on one wide
    monitor. The visual catalog renders a desktop and a narrow viewport, but nobody has looked at the
    result on a real phone or a small laptop, and the item detail dialog in particular spends a lot of
    vertical space on its header — affordable at 1440px, possibly not at 800. Review every screen at
    a range of widths, and decide what the product actually claims about mobile, before release.
 
-3. **Configuration belongs off the monitoring board.** Local durability, webhook relay, settings
-   export/import, diagnostics export, clear stored data, and durable device security are all
-   one-time or occasional setup, and they currently sit on the page whose job is showing work that
-   needs attention. Moving them behind a settings route is agreed in principle; the split and the
-   navigation are undecided.
+**Closed 2026-09-04: the audio readiness overclaim.** `prepareForMonitoring` reported the audio channel as `Ready` on the strength of the muted unlock, which every browser permits unconditionally, so the indicator was green on a machine where no tone could be heard. It now reports `untested`; only the test tone or a delivered alert, both of which play unmuted at the configured volume, reach `ready`. The distinction is asserted in `src/application/browser-alert-coordinator.test.ts` against a transport that permits muted playback and refuses audible playback, which is the machine the developer actually had. Whether a person *hears* the tone is outside what a page can observe, and the interface now says so rather than implying the indicator settles it.
+
+**Closed 2026-09-04: configuration moved off the monitoring board.** Alert delivery, local durability, durable device security, settings export/import, diagnostics and clear-stored-data now live on a `#/settings` route reached from the top bar. Exhausted alert deliveries deliberately stayed on the board: a failed delivery is a decision waiting on the operator, not a setting.
 
 ### 8.3d Open product questions raised in live testing (2026-09-04)
 
@@ -573,6 +562,19 @@ A milestone is done only when:
 - Cross-device workflow synchronization and conflict resolution.
 - Multi-account active UI.
 - Server push/service-worker closed-page monitoring.
+- **Notifications on iOS ("PWA tier 2").** V1 ships tier 1: a web app manifest and icons, so the
+  application installs to an iOS home screen and runs without browser chrome. That is a layout and
+  packaging change only — there is no service worker, and installing alters no behaviour.
+  Notifications on iOS need more: Apple exposes them only to a home-screen web app **and** requires
+  them to be raised through `ServiceWorkerRegistration.showNotification()`, where AckWatch uses the
+  `Notification` constructor (itself deprecated in Chrome on Android, so this would eventually be
+  worth doing regardless). Taking it on means adding a service worker to an application whose whole
+  claim is local durability — with its cache-staleness failure modes — extending the CSP for it,
+  and reworking the notification transport. It also reverses the §8.3a decision that Safari is out
+  of scope, which cannot be half-taken: shipping iOS notifications while documenting iOS as
+  unsupported is not a coherent position. One input to that decision needs checking first, and has
+  not been: whether an *installed* home-screen web app is subject to the seven-day ITP eviction of
+  IndexedDB that the §8.3a reasoning rests on, or whether installation exempts it.
 - Room creation, invitation management, or message composition in the user-facing app.
 - Advanced filtering by spaces/DM classification until all-joined-room reliability is proven.
 

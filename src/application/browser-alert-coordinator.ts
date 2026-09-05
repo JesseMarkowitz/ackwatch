@@ -4,6 +4,7 @@ import type { Clock } from '../domain/clock';
 import {
   AudioAlertTransport,
   BrowserNotificationTransport,
+  type AudioLike,
   type NotificationConstructorLike,
 } from '../infrastructure/browser/local-alert-transports';
 import type { WebhookCredentialStorePort } from '../infrastructure/browser/webhook-credential-store';
@@ -50,6 +51,7 @@ export interface BrowserAlertCoordinatorPort {
 
 export interface BrowserAlertDependencies {
   readonly notificationConstructor?: NotificationConstructorLike;
+  readonly audioFactory?: (source: string) => AudioLike;
   readonly credentialStore?: WebhookCredentialStorePort;
   readonly fetchFn?: typeof fetch;
   readonly windowTarget?: Window;
@@ -78,7 +80,10 @@ export class BrowserAlertCoordinator implements BrowserAlertCoordinatorPort {
       notifications: settings.browserNotificationsEnabled ? 'permission_required' : 'disabled',
       webhook: settings.webhookEnabled ? 'untested' : 'disabled',
     };
-    this.audio = new AudioAlertTransport(() => this.getSettings().audioVolume);
+    this.audio =
+      dependencies.audioFactory === undefined
+        ? new AudioAlertTransport(() => this.getSettings().audioVolume)
+        : new AudioAlertTransport(() => this.getSettings().audioVolume, dependencies.audioFactory);
     const notificationConstructor =
       dependencies.notificationConstructor ??
       (typeof Notification === 'undefined'
@@ -133,7 +138,13 @@ export class BrowserAlertCoordinator implements BrowserAlertCoordinatorPort {
     if (settings.audioEnabled) {
       try {
         await this.audio.prepare();
-        this.setState({ audio: 'ready', audioDetail: undefined });
+        // `untested`, not `ready`. The unlock plays the clip muted, and browsers permit muted
+        // playback unconditionally, so this resolving establishes that an audio element could
+        // start — not that the operator can hear anything. Reporting `Ready` here is what let a
+        // deployment where no tone was ever audible show a healthy indicator throughout. Only the
+        // test tone or a delivered alert, both of which play unmuted at the configured volume,
+        // move this to `ready`.
+        this.setState({ audio: 'untested', audioDetail: undefined });
       } catch (error: unknown) {
         this.setState({ audio: 'fault', audioDetail: this.errorCode(error) });
       }
@@ -200,6 +211,10 @@ export class BrowserAlertCoordinator implements BrowserAlertCoordinatorPort {
       // Unlocked first: a browser only permits sound after a gesture, and this runs inside the
       // click that asked for it, which is exactly the condition a real alert cannot rely on.
       await this.audio.prepare();
+      // Unmuted, at the configured volume. This resolving is the strongest thing the application
+      // can establish about audio — the browser accepted playback of an audible clip — and it is
+      // what `ready` means for this channel. Whether a person heard it depends on the device
+      // volume and, on iOS, the hardware silent switch, neither of which the page can observe.
       await this.audio.send(payload);
       this.setState({ audio: 'ready', audioDetail: undefined });
     } catch (error: unknown) {

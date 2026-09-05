@@ -150,6 +150,36 @@ The newest message in an item is shown in full in the detail dialog, resolved on
 Matrix client rather than from AckWatch's own storage. Earlier messages in a thread are shown as
 their stored previews.
 
+## Installing it as an app
+
+AckWatch ships a web app manifest and icons, so a deployed instance can be installed from the
+browser — Add to Home Screen on iOS and iPadOS, Install on Chromium desktop and Android. Installing
+gets you the application without browser chrome, at a real device viewport, which is the honest way
+to look at its layout on a phone or tablet.
+
+Installing changes nothing else. **There is no service worker**: nothing is cached beyond ordinary
+HTTP, the installed app is the same page as the tab, and it stops working when it is closed exactly
+as the tab does. In particular, installing does not enable notifications on iOS — Apple requires
+those to be raised through a service worker, which AckWatch does not have. See the deferred-work
+section of `docs/IMPLEMENTATION_PLAN.md`.
+
+The icons and `public/icon.svg` are all generated from `tools/rasterize-icons.py`, which is the
+source of the mark's geometry; it needs Pillow and is run by hand when the mark changes.
+
+## Deployment
+
+`npm run build` produces a self-contained `dist/`, with relative asset paths and hash routing, so it
+serves from a domain root or a subpath with no rewrite rules. Two things are not optional:
+
+- **HTTPS.** Four APIs AckWatch depends on — `navigator.locks`, `crypto.subtle`, `Notification`,
+  `navigator.storage` — exist only in a secure context. Over plain HTTP on anything but `localhost`
+  sign-in fails outright.
+- **A Content Security Policy naming your homeserver.** Ship it as a header where the host allows
+  one, or build with `ACKWATCH_META_CSP` to embed it in the page where the host does not.
+
+`docs/DEPLOYMENT.md` has the policy, both delivery routes and what the meta route costs, the CORS
+requirement, and the file-copy steps for a header-less static host.
+
 ## Current boundaries
 
 - Monitoring is never represented as continuing after the page closes.

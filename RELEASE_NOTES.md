@@ -23,6 +23,11 @@ AckWatch server, no account, and no telemetry.
   continuity window (12 hours by default, configurable) offers the interrupted session back with
   your acknowledgements intact; an older one is archived to a redacted summary and replaced. Ending
   a session archives it the same way and clears its work, leaving your configuration alone.
+- **Installable.** A manifest and icons, so it can be added to a home screen or installed from a
+  desktop browser and run without browser chrome. It remains the same page: there is no service
+  worker, nothing is cached beyond ordinary HTTP, and an installed AckWatch stops when it is closed
+  exactly as a tab does. Installing does not enable notifications on iOS, which Apple raises only
+  through a service worker.
 - **Your data, inspectable.** Storage status, export, and clear are in the app, and the diagnostics
   export carries counts, codes, and timings only — no previews, room or event IDs, senders, webhook
   endpoints, or topics.

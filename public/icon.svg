@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="AckWatch">
+  <rect width="100" height="100" rx="22" fill="#153d39"/>
+  <path d="M26.0 54.0 L42.0 69.0 L68.0 36.0" fill="none" stroke="#bfe9d4" stroke-width="9.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="79" cy="21" r="8" fill="#ed775f"/>
+</svg>

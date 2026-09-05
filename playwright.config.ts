@@ -35,6 +35,9 @@ export default defineConfig({
         "font-src 'self' data:",
         "img-src 'self' data:",
         'media-src data:',
+        // Without this the web app manifest is blocked by `default-src 'none'` and the
+        // application is silently not installable; nothing else about the page changes.
+        "manifest-src 'self'",
         "connect-src 'self' https://homeserver.example",
         "base-uri 'none'",
         "form-action 'none'",
