@@ -306,6 +306,15 @@ export function defaultAccountSettings(accountId: string, now: number): AccountS
   };
 }
 
+/**
+ * The build that produced an export, for whoever opens the file later. It answers a different
+ * question from `formatVersion`, which tells a parser whether it can read the document at all —
+ * conflating the two would make every release look like a format change.
+ */
+function applicationVersion(): string {
+  return typeof __ACKWATCH_VERSION__ === 'string' ? __ACKWATCH_VERSION__ : 'unknown';
+}
+
 export class WorkflowRepository {
   private readonly database: WorkflowDatabase;
   private intentionallyClosing = false;
@@ -979,7 +988,8 @@ export class WorkflowRepository {
     return JSON.stringify(
       {
         kind: 'ackwatch-session-summary',
-        version: 1,
+        formatVersion: 1,
+        application: applicationVersion(),
         session: { startedAt: session.startedAt, endedAt, endReason },
         totals: {
           items: projection.items.length,
@@ -1072,32 +1082,44 @@ export class WorkflowRepository {
 
   public async exportSettings(accountId: string): Promise<string> {
     const settings = await this.getSettings(accountId);
-    return JSON.stringify({ kind: 'ackwatch-settings', version: 3, settings }, null, 2);
+    return JSON.stringify(
+      { kind: 'ackwatch-settings', formatVersion: 3, application: applicationVersion(), settings },
+      null,
+      2,
+    );
   }
 
   public async importSettings(
     accountId: string,
     serialized: string,
   ): Promise<AccountSettingsRecord> {
+    // `version` was renamed to `formatVersion` because it read as the application's version and
+    // was repeatedly taken for one. Exports written before the rename are still accepted: a file
+    // an operator saved last week must not stop importing because a field was clarified.
+    const document: unknown = JSON.parse(serialized);
+    const normalized =
+      typeof document === 'object' && document !== null && !('formatVersion' in document)
+        ? { ...document, formatVersion: (document as { version?: unknown }).version }
+        : document;
     const envelope = z
-      .discriminatedUnion('version', [
+      .discriminatedUnion('formatVersion', [
         z.object({
           kind: z.literal('ackwatch-settings'),
-          version: z.literal(1),
+          formatVersion: z.literal(1),
           settings: phaseThreeSettingsSchema,
         }),
         z.object({
           kind: z.literal('ackwatch-settings'),
-          version: z.literal(2),
+          formatVersion: z.literal(2),
           settings: phaseFourSettingsSchema,
         }),
         z.object({
           kind: z.literal('ackwatch-settings'),
-          version: z.literal(3),
+          formatVersion: z.literal(3),
           settings: settingsSchema,
         }),
       ])
-      .parse(JSON.parse(serialized));
+      .parse(normalized);
     const imported = settingsSchema.parse({
       ...defaultAccountSettings(accountId, this.now()),
       ...envelope.settings,
@@ -1271,7 +1293,8 @@ export class WorkflowRepository {
     return JSON.stringify(
       {
         kind: 'ackwatch-diagnostics',
-        version: 1,
+        formatVersion: 1,
+        application: applicationVersion(),
         generatedAt: new Date(now).toISOString(),
         schema: { database: database.verno, settings: settings.schemaVersion },
         session: {

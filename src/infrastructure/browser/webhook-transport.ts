@@ -5,6 +5,7 @@ import {
   type GenericAlertPayload,
 } from '../../application/alert-dispatcher';
 import type { AccountSettingsRecord } from '../persistence/workflow-database';
+import type { PolicyViolationLogPort } from './content-security-policy-log';
 import type { WebhookCredentialStorePort } from './webhook-credential-store';
 
 function isLoopback(hostname: string): boolean {
@@ -49,6 +50,9 @@ export class WebhookTransport implements AlertTransport {
     // reader at the network. Node's fetch does not care about the receiver, so the whole test
     // suite passed against it.
     private readonly fetchFn: typeof fetch = (input, init) => fetch(input, init),
+    // Consulted only when a request fails, to tell "the policy refused this" apart from "the
+    // server did not answer". Both arrive as the same TypeError.
+    private readonly policyLog?: PolicyViolationLogPort,
   ) {}
 
   public async send(payload: GenericAlertPayload): Promise<{ responseStatus: number }> {
@@ -99,6 +103,11 @@ export class WebhookTransport implements AlertTransport {
     } catch (error: unknown) {
       if (error instanceof AlertTransportError) throw error;
       if (abort.signal.aborted) throw new AlertTransportError('TIMEOUT', true);
+      // A policy refusal is not retryable: nothing about waiting changes a deployment's CSP, and
+      // retrying it burns the delivery's attempts against a wall.
+      if (this.policyLog?.wasBlocked(destination.href)) {
+        throw new AlertTransportError('BLOCKED_BY_CONTENT_SECURITY_POLICY', false);
+      }
       throw new AlertTransportError(
         'CONNECTION_OR_CORS_FAILURE',
         true,

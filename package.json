@@ -1,6 +1,6 @@
 {
   "name": "ackwatch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "A local-first attention monitor for Matrix",
   "license": "Apache-2.0",
@@ -12,8 +12,8 @@
   "packageManager": "npm@10.9.8",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && node tools/assert-production-bundle.mjs",
-    "build:catalog": "tsc -b && vite build --mode catalog --outDir dist-catalog",
+    "build": "tsc -b && vite build && node tools/build-instructions.mjs dist && node tools/assert-production-bundle.mjs",
+    "build:catalog": "tsc -b && vite build --mode catalog --outDir dist-catalog && node tools/build-instructions.mjs dist-catalog",
     "build:benchmark": "tsc -b && vite build --mode benchmark --outDir dist-benchmark",
     "preview": "vite preview",
     "format": "prettier --write .",

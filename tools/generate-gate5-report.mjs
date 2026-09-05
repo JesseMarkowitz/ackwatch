@@ -171,6 +171,11 @@ const soakNoise = [
   { pattern: /\/room_keys\/version\b/u },
   // The static test host intentionally serves no favicon.
   { pattern: /\/favicon\.ico$/u },
+  // A deployment may replace the alert sound by dropping alert-tone.wav or .mp3 beside index.html.
+  // The application probes for those names once per session; where no custom tone exists — which
+  // is every run of this rig — the host answers 404. Bounded to the two probes the application
+  // makes, so a loop that probed on every alert would not pass as noise.
+  { pattern: /\/alert-tone\.(?:wav|mp3)\b/u, maxOccurrences: 2 },
   // The run drops the connection on purpose; in-flight requests fail while it is offline.
   { pattern: /net::ERR_INTERNET_DISCONNECTED|ConnectionError|Failed to fetch/u },
   // The app logs in with `refresh_token: true`, and Synapse's refreshable access tokens are short

@@ -23,6 +23,9 @@ AckWatch server, no account, and no telemetry.
   continuity window (12 hours by default, configurable) offers the interrupted session back with
   your acknowledgements intact; an older one is archived to a redacted summary and replaced. Ending
   a session archives it the same way and clears its work, leaving your configuration alone.
+- **An alert tone you can replace.** The bundled sound is a short rising figure, inlined so nothing
+  is fetched from the network. A deployment can override it by dropping `alert-tone.wav` or
+  `alert-tone.mp3` beside `index.html`, with no rebuild and no setting.
 - **Installable.** A manifest and icons, so it can be added to a home screen or installed from a
   desktop browser and run without browser chrome. It remains the same page: there is no service
   worker, nothing is cached beyond ordinary HTTP, and an installed AckWatch stops when it is closed
@@ -66,8 +69,22 @@ These are properties of the product, not defects awaiting a fix.
   that "how long has this session been running" has one answer.
 - **Sign-in is session-only.** Passwords are never retained. Signing in again after the session ends
   is expected, not a bug.
-- **The homeserver must send permissive CORS headers** for the client-server API. Synapse does by
-  default; a reverse proxy that strips them makes sign-in fail with a network error.
+- **Monitoring never resumes by itself.** After every reload you arm it again. Coverage is something
+  you chose rather than something assumed, and incomplete gap recovery can never appear healthy.
+- **Nothing syncs between devices.** The queue lives in the browser that built it. Another device,
+  or another browser on the same machine, starts empty. There is no server to sync through.
+- **Replying in another client does not settle an item.** AckWatch does not ingest your own
+  messages, so answering from a different Matrix client leaves the item waiting until you
+  acknowledge it here.
+- **AckWatch must be served over HTTPS.** Four APIs it depends on — `navigator.locks`,
+  `crypto.subtle`, `Notification`, `navigator.storage` — exist only in a secure context, so a plain
+  HTTP origin other than `localhost` fails at sign-in.
+- **The homeserver must send permissive CORS headers** for the client-server API **and for its
+  `.well-known/matrix/client` discovery document**. Synapse sends them for its own API; the
+  discovery file is usually served by the reverse proxy instead and inherits none of them, which
+  makes sign-in from a user ID fail while the API beside it answers correctly.
+- **No third-party runtime code.** No analytics, no remote fonts, no CDN, no telemetry. Everything
+  the page loads comes from the deployment that served it.
 
 ### Performance
 

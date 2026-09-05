@@ -58,3 +58,32 @@ test('the application is installable under the documented policy', async ({ page
   ).toEqual([]);
   expect(violations).toEqual([]);
 });
+
+/**
+ * The instructions ship with the build and the application links to them, so the link and the page
+ * have to be verified together: a build that emits the page but drops the link, or a link that
+ * survives while the page stops being generated, both leave the operator with nothing and neither
+ * shows up as a failure anywhere else.
+ */
+test('the operator instructions ship with the build and are reachable from the app', async ({
+  page,
+  request,
+}) => {
+  await page.goto('/');
+  const link = page.getByRole('link', { name: 'Instructions' });
+  await expect(link).toHaveAttribute('href', './instructions.html');
+
+  const instructions = await request.get('/instructions.html');
+  expect(instructions.status()).toBe(200);
+  const html = await instructions.text();
+  expect(html).toContain('AckWatch instructions');
+  // Rendered, not shipped as raw Markdown for the browser to display as plain text.
+  expect(html).toContain('<table>');
+  expect(html).not.toContain('## ');
+
+  // The page carries its own policy and links its stylesheet, because an inline <style> would be
+  // refused by the same style-src the application runs under.
+  expect(html).toContain('./instructions.css');
+  expect(html).not.toContain('<style>');
+  expect((await request.get('/instructions.css')).status()).toBe(200);
+});

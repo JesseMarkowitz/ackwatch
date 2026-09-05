@@ -5,9 +5,12 @@ import {
   type GenericAlertPayload,
 } from '../../application/alert-dispatcher';
 
-// A short 8-bit PCM WAV tone bundled into the production JavaScript; no network asset is loaded.
-const alertTone =
-  'data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YRAAAACAqb/Jx6mAYDc5Y6vPyp+AgA==';
+import { bundledAlertTone } from './alert-tone';
+import {
+  resolveAlertTone,
+  type ResolvedAlertTone,
+  type TonePresenceProbe,
+} from './alert-tone-source';
 
 export interface AudioLike {
   volume: number;
@@ -20,11 +23,38 @@ export interface AudioLike {
 export class AudioAlertTransport implements AlertTransport {
   public readonly kind = 'audio' as const;
   private unlocked = false;
+  private resolving: Promise<ResolvedAlertTone> | undefined;
+  private resolved: ResolvedAlertTone | undefined;
 
   public constructor(
     private readonly volume: () => number,
     private readonly createAudio: (source: string) => AudioLike = (source) => new Audio(source),
+    private readonly probe?: TonePresenceProbe,
   ) {}
+
+  /**
+   * Resolved once and reused. A deployment's tone does not appear or vanish mid-session, and
+   * probing at every alert would put two requests in front of every escalation.
+   */
+  private async tone(): Promise<ResolvedAlertTone> {
+    this.resolving ??= (
+      this.probe === undefined ? resolveAlertTone() : resolveAlertTone(this.probe)
+    )
+      // A probe that throws must never cost the operator their alert: fall back to the tone that
+      // is compiled in and cannot fail to be there.
+      .catch((): ResolvedAlertTone => ({ source: bundledAlertTone, custom: undefined }))
+      .then((tone) => {
+        this.resolved = tone;
+        return tone;
+      });
+    return this.resolving;
+  }
+
+  /** Which tone last played, so an interface can tell a deployer their file was picked up. */
+  public source(): 'bundled' | 'custom' | 'unresolved' {
+    if (!this.resolved) return 'unresolved';
+    return this.resolved.custom === undefined ? 'bundled' : 'custom';
+  }
 
   /**
    * Opens the autoplay gate, and establishes nothing about audibility. The clip is played muted,
@@ -33,7 +63,8 @@ export class AudioAlertTransport implements AlertTransport {
    * plays unmuted.
    */
   public async prepare(): Promise<void> {
-    const audio = this.createAudio(alertTone);
+    const { source } = await this.tone();
+    const audio = this.createAudio(source);
     audio.muted = true;
     try {
       await audio.play();
@@ -49,7 +80,8 @@ export class AudioAlertTransport implements AlertTransport {
   public async send(payload: GenericAlertPayload): Promise<Record<string, never>> {
     void payload;
     if (!this.unlocked) throw new AlertTransportError('AUDIO_NOT_READY', false);
-    const audio = this.createAudio(alertTone);
+    const { source } = await this.tone();
+    const audio = this.createAudio(source);
     audio.volume = this.volume();
     audio.muted = false;
     try {

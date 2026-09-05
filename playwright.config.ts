@@ -34,7 +34,10 @@ export default defineConfig({
         "style-src 'self'",
         "font-src 'self' data:",
         "img-src 'self' data:",
-        'media-src data:',
+        // `'self'` as well as `data:`: a deployment may drop its own alert-tone file in beside
+        // index.html, and without this the bundled tone plays while the deployer's file is
+        // silently refused.
+        "media-src 'self' data:",
         // Without this the web app manifest is blocked by `default-src 'none'` and the
         // application is silently not installable; nothing else about the page changes.
         "manifest-src 'self'",

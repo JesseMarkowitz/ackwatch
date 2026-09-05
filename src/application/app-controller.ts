@@ -22,6 +22,7 @@ import {
 import type { AlertRepositoryPort } from './alert-dispatcher';
 import type { EventDetail } from './event-detail';
 import { initialCryptoSnapshot, type CryptoSnapshot } from './crypto-status';
+import { ContentSecurityPolicyLog } from '../infrastructure/browser/content-security-policy-log';
 import {
   BrowserStorageHealth,
   type BrowserStorageSnapshot,
@@ -243,11 +244,16 @@ export class AckWatchController implements AckWatchControllerPort {
   private sessionNotice: string | undefined;
   private archivedSummary: string | undefined;
   private alerts: BrowserAlertCoordinatorPort | undefined;
+  private readonly policyLog = new ContentSecurityPolicyLog(document);
+  private readonly uninstallPolicyLog: () => void;
   private cryptoSnapshot: CryptoSnapshot = initialCryptoSnapshot;
   private currentSnapshot: AppSnapshot;
 
   public constructor(dependencies: AppControllerDependencies = {}) {
     this.clock = dependencies.clock ?? systemClock;
+    // Installed before anything can make a request, so a connection this deployment's policy
+    // refuses is explained rather than reported as an unexplained network failure.
+    this.uninstallPolicyLog = this.policyLog.install();
     this.coverage = new CoverageMachine(this.clock);
     this.authentication = dependencies.authentication ?? new MatrixAuthentication(this.clock);
     this.credentialStore = dependencies.credentialStore ?? new SessionCredentialStore();
@@ -273,7 +279,7 @@ export class AckWatchController implements AckWatchControllerPort {
           options.accountId,
           options.clock,
           options.getSettings,
-          { onChange: options.onChange },
+          { onChange: options.onChange, policyLog: this.policyLog },
         ));
     this.currentSnapshot = this.buildSnapshot();
   }
@@ -531,6 +537,7 @@ export class AckWatchController implements AckWatchControllerPort {
     await this.runtime?.stop();
     this.alerts?.stop();
     this.workflow?.close();
+    this.uninstallPolicyLog();
     await this.lease?.release();
   }
 

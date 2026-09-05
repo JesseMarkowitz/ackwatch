@@ -426,6 +426,25 @@ describe('WorkflowRepository schemas, settings, and corruption', () => {
     });
   });
 
+  it('stamps exports with the format version a parser needs and the build a person needs', async () => {
+    const repository = await createRepository();
+    await repository.putSettings(defaultAccountSettings(accountId, 1_000));
+
+    const exported: unknown = JSON.parse(await repository.exportSettings(accountId));
+
+    expect(exported).toMatchObject({
+      kind: 'ackwatch-settings',
+      // The parser's contract. It moves when the shape moves, and not when a release ships.
+      formatVersion: 3,
+      // The human's answer to "what produced this file", which no export carried before.
+      application: expect.any(String),
+    });
+    // Round-trips through its own importer: the rename must not orphan what it writes.
+    await expect(
+      repository.importSettings(accountId, JSON.stringify(exported)),
+    ).resolves.toMatchObject({ accountId });
+  });
+
   it('imports a released Phase 3 settings export without enabling its webhook', async () => {
     const repository = await createRepository();
     const legacy = JSON.stringify({

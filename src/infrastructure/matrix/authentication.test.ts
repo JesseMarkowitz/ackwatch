@@ -1,9 +1,34 @@
+import { AutoDiscoveryAction, AutoDiscoveryError, type ClientConfig } from 'matrix-js-sdk';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Clock } from '../../domain/clock';
-import { MatrixAuthentication, type UnauthenticatedMatrixClient } from './authentication';
+import {
+  MatrixAuthentication,
+  type ClientConfigDiscovery,
+  type UnauthenticatedMatrixClient,
+} from './authentication';
 
 const clock: Clock = { now: () => 1_000 };
+
+const unusedClient: UnauthenticatedMatrixClient = {
+  loginFlows: async () => ({ flows: [{ type: 'm.login.password' }] }),
+  loginRequest: async () => {
+    throw new Error('not reached');
+  },
+};
+
+function discovery(homeserver: Partial<ClientConfig['m.homeserver']>): ClientConfigDiscovery {
+  return async () =>
+    ({
+      'm.homeserver': {
+        state: AutoDiscoveryAction.PROMPT,
+        error: null,
+        base_url: null,
+        ...homeserver,
+      },
+      'm.identity_server': { state: AutoDiscoveryAction.PROMPT, error: null, base_url: null },
+    }) as ClientConfig;
+}
 
 describe('MatrixAuthentication', () => {
   it('queries advertised flows and requests refresh-token capable password login', async () => {
@@ -62,5 +87,57 @@ describe('MatrixAuthentication', () => {
     await expect(auth.prepare('@monitor:example.test', 'http://example.test')).rejects.toThrow(
       /https/i,
     );
+  });
+
+  /*
+   * These three failures reached the operator as one sentence about discovery not returning a base
+   * URL, which sent them to check a homeserver that was answering correctly. They have nothing in
+   * common and each has a different fix, so each has to say which one happened.
+   */
+  it('separates a homeserver that advertises nothing from one whose document cannot be read', async () => {
+    const missing = new MatrixAuthentication(
+      clock,
+      () => unusedClient,
+      discovery({ state: AutoDiscoveryAction.PROMPT, error: null }),
+    );
+    await expect(missing.prepare('@monitor:example.test')).rejects.toThrow(
+      /No discovery document at https:\/\/example\.test\/\.well-known\/matrix\/client/,
+    );
+
+    const refused = new MatrixAuthentication(
+      clock,
+      () => unusedClient,
+      discovery({ state: AutoDiscoveryAction.FAIL_PROMPT, error: AutoDiscoveryError.Invalid }),
+    );
+    // The cause the developer actually hit: the file exists and is correct, and the browser is not
+    // allowed to read it, because .well-known is served by the proxy and carries no CORS header.
+    await expect(refused.prepare('@monitor:example.test')).rejects.toThrow(
+      /Access-Control-Allow-Origin/,
+    );
+  });
+
+  it('reports a discovered homeserver that does not answer as a homeserver', async () => {
+    const auth = new MatrixAuthentication(
+      clock,
+      () => unusedClient,
+      discovery({
+        state: AutoDiscoveryAction.FAIL_ERROR,
+        error: AutoDiscoveryError.InvalidHomeserver,
+        base_url: 'https://matrix.example.test',
+      }),
+    );
+
+    await expect(auth.prepare('@monitor:example.test')).rejects.toThrow(
+      /names https:\/\/matrix\.example\.test, which did not answer as a Matrix homeserver/,
+    );
+  });
+
+  it('never runs discovery when an override is given', async () => {
+    const discover = vi.fn(discovery({ state: AutoDiscoveryAction.PROMPT }));
+    const auth = new MatrixAuthentication(clock, () => unusedClient, discover);
+
+    await auth.prepare('@monitor:example.test', 'https://matrix.example.test');
+
+    expect(discover).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 
+import { AlertTransportError } from '../application/alert-dispatcher';
 import type { AckWatchControllerPort, AppSnapshot } from '../application/app-controller';
 import type { FoundationViewModel } from './view-model';
 import { signedOutView } from './view-model';
@@ -120,6 +121,87 @@ function coverageTone(connection: AppSnapshot['coverage']['connection']): string
   return 'neutral';
 }
 
+/**
+ * Turns a transport's code into the sentence the operator needs, without discarding what the
+ * browser said.
+ *
+ * The codes are deliberately terse and stable, because they are persisted and tallied in
+ * diagnostics — and they must stay free of destinations, so the explanation of a failed
+ * destination has to be built here, where the configured endpoint is already on screen. Reporting
+ * the bare code sent a developer looking at their network when they had mistyped a URL.
+ */
+/**
+ * Copies, and says whether it copied.
+ *
+ * `navigator.clipboard.writeText` needs a secure context and a user gesture, and can still be
+ * refused by permissions policy. Reporting success without waiting on the promise would be the
+ * same false claim the audio readiness indicator used to make, and the operator would find out by
+ * pasting nothing. The text stays on screen either way, so a refusal costs a select-and-copy
+ * rather than the export.
+ */
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard?.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function copyOutcome(copied: boolean, what: string): string {
+  return copied
+    ? `${what} copied to the clipboard.`
+    : `${what} ready below \u2014 the browser refused clipboard access, so select and copy it.`;
+}
+
+/**
+ * Hands the operator a file. A diagnostics report's destination is usually an attachment on a bug
+ * report, and a clipboard round-trip through another application to become a file is a detour.
+ */
+function downloadText(filename: string, text: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  // Revoked on the next turn of the loop: revoking synchronously races the download in Firefox.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function explainAlertFailure(error: unknown): string {
+  const code = error instanceof AlertTransportError ? error.code : undefined;
+  const raw = error instanceof Error ? error.message : String(error);
+  const explanation = ((): string | undefined => {
+    switch (code) {
+      case 'BLOCKED_BY_CONTENT_SECURITY_POLICY':
+        return "this deployment's Content Security Policy does not permit connections to that destination. Its connect-src has to name the destination's origin, which is set where AckWatch is hosted — no setting here can get past it";
+      case 'CONNECTION_OR_CORS_FAILURE':
+        return 'the browser could not reach it. Check the server URL is spelled correctly, that the server is running and reachable from this device, and that it permits requests from this page';
+      case 'TIMEOUT':
+        return 'it did not answer in time. Check the server is running and the timeout is long enough';
+      case 'AUTHENTICATION_FAILED':
+        return 'it rejected the credentials. Check the access token';
+      case 'INVALID_DESTINATION':
+        return 'that is not a valid URL';
+      case 'HTTPS_REQUIRED':
+        return 'the URL must use HTTPS, except on localhost';
+      case 'INVALID_NTFY_TOPIC':
+        return 'an ntfy topic may contain only letters, digits, dashes and underscores';
+      case 'DESTINATION_MUST_NOT_CONTAIN_CREDENTIALS_OR_QUERY':
+        return 'the URL must not carry a username, password, or query string — the access token belongs in the token field';
+      case 'AUDIO_NOT_READY':
+        return 'the browser has not permitted sound on this page yet';
+      case 'AUDIO_PLAYBACK_FAILED':
+        return 'the browser refused to play it. Sound usually needs a click on the page first';
+      default:
+        return code?.startsWith('HTTP_') === true
+          ? `it answered ${code.replace('HTTP_', 'HTTP ')}`
+          : undefined;
+    }
+  })();
+  return explanation === undefined ? raw : `${explanation} (${raw})`;
+}
+
 function alertTone(state: AppSnapshot['alerts']['audio']): string {
   if (state === 'ready') return 'healthy';
   if (state === 'untested') return 'neutral';
@@ -228,12 +310,10 @@ function AlertSettingsPanel({
               settled.then(
                 () =>
                   setToneStatus(
-                    'Alert tone played at the configured volume. If you heard nothing, the browser accepted it and the device silenced it — check the system volume, and on iOS the silent switch.',
+                    `Played ${snapshot.alerts.audioToneSource === 'custom' ? "this deployment's own alert-tone file" : 'the bundled alert tone'} at the configured volume. If you heard nothing, the browser accepted it and the device silenced it — check the system volume, and on iOS the silent switch.`,
                   ),
                 (error: unknown) =>
-                  setToneStatus(
-                    `Alert tone failed — ${error instanceof Error ? error.message : String(error)}`,
-                  ),
+                  setToneStatus(`Alert tone failed — ${explainAlertFailure(error)}`),
               ),
               // Held long enough to be seen. The clip is a fraction of a second, so feedback tied
               // strictly to its duration would flicker and read as nothing happening.
@@ -344,11 +424,10 @@ function AlertSettingsPanel({
                 void controller?.sendTestWebhook().then(
                   () => setStatus('Test notification delivered.'),
                   (error: unknown) =>
-                    // Report what actually failed rather than the likeliest cause. A guessed
-                    // explanation sends the reader somewhere else entirely when it is wrong.
-                    setStatus(
-                      `Test failed — ${error instanceof Error ? error.message : String(error)}`,
-                    ),
+                    // Report what actually failed rather than the likeliest cause, and say what to
+                    // do about it. A guessed explanation sends the reader somewhere else entirely
+                    // when it is wrong; a bare code leaves them nowhere to go when it is right.
+                    setStatus(`Test failed — ${explainAlertFailure(error)}`),
                 )
               }
             >
@@ -1487,15 +1566,35 @@ function SettingsView({
                 type="button"
                 className="button-secondary"
                 onClick={() => {
-                  void controller?.exportSettings().then((value) => {
-                    if (value) setSettingsTransfer(value);
-                    setSettingsStatus(
-                      value ? 'Settings prepared for copy.' : 'No settings available.',
-                    );
+                  void controller?.exportSettings().then(async (value) => {
+                    if (!value) {
+                      setSettingsStatus('No settings available.');
+                      return;
+                    }
+                    setSettingsTransfer(value);
+                    setTransferKind('settings');
+                    setSettingsStatus(copyOutcome(await copyToClipboard(value), 'Settings'));
                   });
                 }}
               >
                 Export settings
+              </button>
+              <button
+                type="button"
+                className="button-secondary"
+                disabled={!settingsTransfer}
+                onClick={() => {
+                  void copyToClipboard(settingsTransfer).then((copied) =>
+                    setSettingsStatus(
+                      copyOutcome(
+                        copied,
+                        transferKind === 'diagnostics' ? 'Diagnostics report' : 'Settings',
+                      ),
+                    ),
+                  );
+                }}
+              >
+                Copy
               </button>
               <button
                 type="button"
@@ -1525,18 +1624,37 @@ function SettingsView({
                 type="button"
                 className="button-secondary"
                 onClick={() => {
-                  void controller?.exportDiagnostics().then((value) => {
-                    if (value) {
-                      setSettingsTransfer(value);
-                      setTransferKind('diagnostics');
+                  void controller?.exportDiagnostics().then(async (value) => {
+                    if (!value) {
+                      setSettingsStatus('No diagnostics available.');
+                      return;
                     }
+                    setSettingsTransfer(value);
+                    setTransferKind('diagnostics');
                     setSettingsStatus(
-                      value ? 'Diagnostics report prepared for copy.' : 'No diagnostics available.',
+                      copyOutcome(await copyToClipboard(value), 'Diagnostics report'),
                     );
                   });
                 }}
               >
                 Export diagnostics
+              </button>
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => {
+                  void controller?.exportDiagnostics().then((value) => {
+                    if (!value) {
+                      setSettingsStatus('No diagnostics available.');
+                      return;
+                    }
+                    const stamp = new Date().toISOString().replaceAll(/[:.]/gu, '-');
+                    downloadText(`ackwatch-diagnostics-${stamp}.json`, value);
+                    setSettingsStatus('Diagnostics report downloaded.');
+                  });
+                }}
+              >
+                Download diagnostics
               </button>
               <button
                 type="button"
@@ -1633,6 +1751,19 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
               {onSettings ? 'Board' : 'Settings'}
             </button>
           ) : null}
+          {/*
+            A link rather than a button: the instructions are a page that ships with the build, so
+            they open in their own tab, survive the application failing to start, and can be
+            bookmarked or sent to someone. `rel` is set because the target is a new context.
+          */}
+          <a
+            className="topbar__about"
+            href="./instructions.html"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Instructions
+          </a>
           <button className="topbar__about" type="button" onClick={() => setAboutOpen(true)}>
             About
           </button>

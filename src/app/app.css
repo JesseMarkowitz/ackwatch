@@ -171,6 +171,9 @@ button:disabled {
   color: var(--forest);
   background: transparent;
   font-size: 0.72rem;
+  /* Stated for the same reason as the border: a button and a link wearing one class must not
+     inherit two different weights and read as two different kinds of control. */
+  font-weight: 750;
 }
 
 .health-strip {
@@ -1420,12 +1423,22 @@ footer p {
 }
 
 .topbar__about {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  /* Declared rather than inherited from the user agent: this class is worn by both a button and a
+     link, and a button's default border made the two sit side by side looking like different
+     kinds of control. */
+  border: 1px solid transparent;
   min-height: 2.5rem;
   padding: 0.5rem 0.85rem;
   border-radius: 999px;
   color: var(--forest);
   background: transparent;
   font-size: 0.72rem;
+  /* Stated for the same reason as the border: one class worn by both a button and a link must not
+     inherit two different weights, or the two read as different kinds of control. */
+  font-weight: 750;
 }
 
 .topbar__about:hover,

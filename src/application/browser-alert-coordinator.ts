@@ -7,6 +7,7 @@ import {
   type AudioLike,
   type NotificationConstructorLike,
 } from '../infrastructure/browser/local-alert-transports';
+import type { PolicyViolationLogPort } from '../infrastructure/browser/content-security-policy-log';
 import type { WebhookCredentialStorePort } from '../infrastructure/browser/webhook-credential-store';
 import { WebhookCredentialStore } from '../infrastructure/browser/webhook-credential-store';
 import { WebhookTransport } from '../infrastructure/browser/webhook-transport';
@@ -31,6 +32,12 @@ export interface AlertChannelsSnapshot {
   readonly audio: AlertChannelState;
   readonly notifications: AlertChannelState;
   readonly webhook: AlertChannelState;
+  /**
+   * Which sound the audio channel would play. A deployment can drop its own file in beside
+   * `index.html`, and the operator who did that needs to see whether it was picked up — otherwise
+   * the only way to tell a working custom tone from a silently ignored one is to recognise it.
+   */
+  readonly audioToneSource?: 'bundled' | 'custom' | 'unresolved';
   readonly audioDetail?: string | undefined;
   readonly notificationDetail?: string | undefined;
   readonly webhookDetail?: string | undefined;
@@ -52,6 +59,7 @@ export interface BrowserAlertCoordinatorPort {
 export interface BrowserAlertDependencies {
   readonly notificationConstructor?: NotificationConstructorLike;
   readonly audioFactory?: (source: string) => AudioLike;
+  readonly policyLog?: PolicyViolationLogPort;
   readonly credentialStore?: WebhookCredentialStorePort;
   readonly fetchFn?: typeof fetch;
   readonly windowTarget?: Window;
@@ -91,10 +99,15 @@ export class BrowserAlertCoordinator implements BrowserAlertCoordinatorPort {
         : (Notification as unknown as NotificationConstructorLike));
     this.notifications = new BrowserNotificationTransport(notificationConstructor);
     const credentials = dependencies.credentialStore ?? new WebhookCredentialStore();
-    this.webhook =
-      dependencies.fetchFn === undefined
-        ? new WebhookTransport(accountId, getSettings, credentials)
-        : new WebhookTransport(accountId, getSettings, credentials, dependencies.fetchFn);
+    // Wrapped rather than passed bare for the reason documented on WebhookTransport's own default.
+    const fetchFn: typeof fetch = dependencies.fetchFn ?? ((input, init) => fetch(input, init));
+    this.webhook = new WebhookTransport(
+      accountId,
+      getSettings,
+      credentials,
+      fetchFn,
+      dependencies.policyLog,
+    );
     this.credentials = credentials;
     this.dispatcher = new AlertDispatcher(
       repository,
@@ -235,6 +248,7 @@ export class BrowserAlertCoordinator implements BrowserAlertCoordinatorPort {
     const settings = this.getSettings();
     return {
       ...this.state,
+      audioToneSource: this.audio.source(),
       audio: settings.audioEnabled
         ? this.state.audio === 'disabled'
           ? 'permission_required'
