@@ -77,3 +77,17 @@ Phase 5 items not yet claimed: the six-hour soak, which is scheduled by the deve
 occupies the machine; and the advisory WebKit run, which cannot execute here because WebKit's system
 libraries need root to install. WebKit is wired up and documented as advisory, not as Safari
 support.
+
+## V1 release additions (2026-09-05)
+
+Work shipped after the families above were written. Each row names the executable evidence rather
+than the change that produced it.
+
+| IDs             | Evidence                                                                                     | Result / boundary                                                                                                                                                       |
+| --------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PWA-001         | `tests/browser/pwa.spec.ts`, `public/manifest.json`                                          | Manifest, icons and apple-touch-icon are served and admitted by the deployment policy; a maskable icon is present. No service worker: iOS notifications stay out of V1. |
+| DOC-001         | `tests/browser/pwa.spec.ts`, `instructions.md`, `tools/build-instructions.mjs`               | Operator instructions render into the build and are reachable from the application; the page links its stylesheet rather than inlining one, under the same `style-src`. |
+| ALT-013         | `alert-tone-source.test.ts`                                                                  | The bundled tone meets a duration and amplitude floor. The prior tone was 2.1 ms and inaudible; the floor is the property that was wrong.                               |
+| ALT-014         | `alert-tone-source.test.ts`, `tests/browser/csp.spec.ts`                                     | A deployment's own `alert-tone.wav`/`.mp3` is preferred over the bundled tone and is admitted by `media-src 'self'`; absence falls back without failing.                |
+| SEC-008         | `content-security-policy-log.test.ts`, `authentication.test.ts`, `tests/browser/csp.spec.ts` | A connection refused by policy is reported as such rather than as a network fault, and is not retried; both supported engines are asserted to report the violation.     |
+| ALT-002 (amend) | `browser-alert-coordinator.test.ts`                                                          | Audio readiness reports `untested` after the muted unlock and reaches `ready` only on unmuted playback, so the indicator no longer claims audibility it never tested.   |

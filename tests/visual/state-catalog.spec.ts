@@ -56,12 +56,34 @@ const scenarios = [
   },
   { name: 'signed-out-narrow', state: 'signed-out', viewport: { width: 390, height: 1100 } },
   { name: 'workflow-narrow', state: 'workflow', viewport: { width: 390, height: 1400 } },
+  // The settings route has never appeared in a baseline, though it has been rebuilt twice. It is
+  // reached by hash, so the catalog gets there the same way an operator does.
+  {
+    name: 'settings-desktop',
+    state: 'alerts-ready',
+    viewport: { width: 1440, height: 1400 },
+    hash: '#/settings',
+  },
+  {
+    name: 'settings-narrow',
+    state: 'alerts-ready',
+    viewport: { width: 390, height: 1600 },
+    hash: '#/settings',
+  },
+  // The detail dialog spends a lot of height on its header, which is affordable at 1440 and was
+  // never checked anywhere else.
+  {
+    name: 'workflow-detail-narrow',
+    state: 'workflow',
+    viewport: { width: 390, height: 900 },
+    openDetails: true,
+  },
 ] as const;
 
 for (const scenario of scenarios) {
   test(scenario.name, async ({ page }) => {
     await page.setViewportSize(scenario.viewport);
-    await page.goto(`/?state=${scenario.state}`);
+    await page.goto(`/?state=${scenario.state}${'hash' in scenario ? scenario.hash : ''}`);
     await page.evaluate(() => document.fonts.ready);
 
     await expect(page.locator('html')).toHaveAttribute('data-catalog-state', scenario.state);

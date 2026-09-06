@@ -213,6 +213,16 @@ if (!soak) {
   soakCheck = skipped(
     'The six-hour soak has not been run. Run "npm run test:soak" and re-run this report; §8.2 longevity is unevidenced until then.',
   );
+} else if (soak.worktreeIdentifier === undefined) {
+  // Manifests recorded before the soak stamped its tree. They cannot be attributed to a build, and
+  // guessing which one they came from is exactly the assumption this gate exists to refuse.
+  soakCheck = skipped(
+    'The recorded soak predates soak provenance and names no worktree, so it cannot be attributed to any build. Re-run "npm run test:soak" to gather longevity evidence this report can place.',
+  );
+} else if (soak.worktreeIdentifier !== head) {
+  soakCheck = skipped(
+    `The recorded soak was run from ${soak.worktreeIdentifier}, not the current ${head}. Longevity evidence describes the build it was gathered from; re-run "npm run test:soak" against the release candidate.`,
+  );
 } else if (soak.smokeRun) {
   soakCheck = skipped(
     `The recorded soak was a ${soak.plannedMinutes}-minute smoke run, which exercises the harness but cannot establish a shift-length trend. Run "npm run test:soak" at its default length.`,
@@ -243,6 +253,7 @@ if (!soak) {
   soakCheck = {
     status: 'pass',
     minutes: soak.plannedMinutes,
+    ranFrom: soak.worktreeIdentifier,
     totals: soak.totals,
     growth: soak.growth,
     consoleErrors: {
@@ -297,6 +308,32 @@ const requirements = {
     evidence: ['src/infrastructure/persistence/workflow-repository.test.ts'],
   },
   LONGEVITY: { ids: ['REL-001', 'REL-002'], evidence: ['tests/soak/soak-controller.mjs'] },
+  // Added for the V1 release: work shipped after the requirement families above were written, and
+  // absent from the matrix until now, which made the traceability report quietly incomplete.
+  INSTALLABILITY: {
+    ids: ['PWA-001'],
+    evidence: ['tests/browser/pwa.spec.ts', 'public/manifest.json'],
+  },
+  INSTRUCTIONS: {
+    ids: ['DOC-001'],
+    evidence: ['tests/browser/pwa.spec.ts', 'instructions.md', 'tools/build-instructions.mjs'],
+  },
+  ALERT_TONE: {
+    ids: ['ALT-013', 'ALT-014'],
+    evidence: [
+      'src/infrastructure/browser/alert-tone-source.test.ts',
+      'src/application/browser-alert-coordinator.test.ts',
+      'tests/browser/csp.spec.ts',
+    ],
+  },
+  POLICY_DIAGNOSIS: {
+    ids: ['SEC-008'],
+    evidence: [
+      'src/infrastructure/browser/content-security-policy-log.test.ts',
+      'src/infrastructure/matrix/authentication.test.ts',
+      'tests/browser/csp.spec.ts',
+    ],
+  },
   SCALE: { ids: ['PRF-001', 'PRF-002', 'PRF-003'], evidence: ['tests/scale'] },
 };
 

@@ -5,6 +5,8 @@ import { resolve } from 'node:path';
 
 import { chromium } from '@playwright/test';
 
+import { worktreeIdentifier } from '../../tools/worktree-identifier.mjs';
+
 /**
  * Phase 5 §8.2 longevity soak. It models a working shift rather than a burst: messages arrive at a
  * human cadence, the operator works the queue periodically, and the connection drops and recovers.
@@ -45,6 +47,11 @@ const manifest = {
   runId,
   plannedMinutes: soakMinutes,
   smokeRun,
+  // Which tree this evidence describes. Six hours of longevity data says nothing about a build it
+  // was not gathered from, and the Gate 5 report was pinning the screenshot gallery to HEAD while
+  // silently accepting a soak from any commit — an asymmetry nothing could see from the manifest,
+  // because the manifest did not say.
+  worktreeIdentifier: worktreeIdentifier(),
   startedAt: new Date().toISOString(),
   result: 'running',
   totals: { sent: 0, accepted: 0, acknowledged: 0, completed: 0, reconnects: 0 },

@@ -171,9 +171,6 @@ button:disabled {
   color: var(--forest);
   background: transparent;
   font-size: 0.72rem;
-  /* Stated for the same reason as the border: a button and a link wearing one class must not
-     inherit two different weights and read as two different kinds of control. */
-  font-weight: 750;
 }
 
 .health-strip {
@@ -1299,6 +1296,14 @@ footer p {
 
   .topbar {
     grid-template-columns: 1fr auto;
+  }
+
+  /* Both rows hold more controls than a phone's width fits on one line, and neither wrapped, so
+     the page scrolled sideways. Every narrow baseline had been recording the overflow as a wider
+     screenshot than its viewport — which reads as normal in a gallery, and is why it survived. */
+  .session-bar,
+  .topbar__actions {
+    flex-wrap: wrap;
   }
 
   .topbar__descriptor {
