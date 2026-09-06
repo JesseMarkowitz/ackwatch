@@ -39,19 +39,99 @@ describe('normalization', () => {
     expect(result).toMatchObject({ kind: 'activity', messageType: msgtype, preview: body });
   });
 
-  it('rejects cache/backfill, stopped-window, and self-authored activity intentionally', () => {
+  it('rejects cache/backfill and stopped-window activity intentionally', () => {
     expect(
       normalizeEnvelope(envelope({ provenance: 'backfill' }), '@monitor:example.test'),
     ).toMatchObject({ kind: 'ignored', reason: 'backfill_not_recovery' });
     expect(
       normalizeEnvelope(envelope({ eligibleAtDelivery: false }), '@monitor:example.test'),
     ).toMatchObject({ kind: 'ignored', reason: 'monitoring_off' });
+  });
+
+  /*
+   * EVT-011, amended 2026-09-05. Self-authored activity used to be dropped here, which was right
+   * about alerting and wrong about the record: an item's history showed one side of a conversation
+   * the operator had taken part in. It is retained and marked instead, and everything downstream
+   * filters on the mark.
+   */
+  it('keeps the operator\u2019s own message as context rather than dropping it', () => {
     expect(
       normalizeEnvelope(
         envelope({ event: { ...envelope().event, sender: '@monitor:example.test' } }),
         '@monitor:example.test',
       ),
-    ).toMatchObject({ kind: 'ignored', reason: 'self_authored' });
+    ).toMatchObject({ kind: 'activity', attention: 'context_only' });
+  });
+
+  it('marks a message that names the operator, or arrives in a room of two, as direct', () => {
+    const ambient = normalizeEnvelope(envelope(), '@monitor:example.test');
+    expect(ambient).toMatchObject({ addressing: 'ambient' });
+
+    const mentioned = normalizeEnvelope(
+      envelope({
+        event: {
+          ...envelope().event,
+          content: {
+            msgtype: 'm.text',
+            body: 'can you look at this',
+            'm.mentions': { user_ids: ['@monitor:example.test'] },
+          },
+        },
+      }),
+      '@monitor:example.test',
+    );
+    expect(mentioned).toMatchObject({ addressing: 'direct' });
+
+    expect(
+      normalizeEnvelope(envelope({ directRoom: true }), '@monitor:example.test'),
+    ).toMatchObject({ addressing: 'direct' });
+  });
+
+  /*
+   * EVT-009, amended 2026-09-05. Reactions were an explicit non-goal, on the reasoning that a
+   * reaction is not work. A reaction from someone else is a response — frequently the only response
+   * a message gets — and the case that prompted the change is a reaction to the operator's own
+   * message, which is why retaining self-authored activity had to come first.
+   */
+  it('treats another person\u2019s reaction as work and the operator\u2019s own as context', () => {
+    const reaction = (sender: string) =>
+      normalizeEnvelope(
+        envelope({
+          event: {
+            ...envelope().event,
+            eventId: `$reaction-${sender}`,
+            sender,
+            type: 'm.reaction',
+            content: {
+              'm.relates_to': { rel_type: 'm.annotation', event_id: '$target', key: '\u{1F44D}' },
+            },
+          },
+        }),
+        '@monitor:example.test',
+      );
+
+    expect(reaction('@other:example.test')).toMatchObject({
+      kind: 'activity',
+      messageType: 'm.reaction',
+      relationKind: 'reaction',
+      relationEventId: '$target',
+      attention: 'requires_attention',
+    });
+    expect(reaction('@monitor:example.test')).toMatchObject({
+      kind: 'activity',
+      attention: 'context_only',
+    });
+  });
+
+  it('ignores a reaction that annotates nothing', () => {
+    expect(
+      normalizeEnvelope(
+        envelope({
+          event: { ...envelope().event, type: 'm.reaction', content: { 'm.relates_to': {} } },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({ kind: 'ignored', reason: 'unsupported_relation' });
   });
 
   it('uses Unicode code points for the bounded preview', () => {

@@ -114,7 +114,9 @@ const queueItem = (
       }),
 });
 
-const attentionItem = queueItem('attention', 'NEW');
+// Marked direct so the label that distinguishes a request addressed to the operator appears in a
+// baseline rather than only in the code that draws it.
+const attentionItem = { ...queueItem('attention', 'NEW'), direct: true };
 const openItem = queueItem('open', 'ACKNOWLEDGED', 'Waiting on the maintenance window owner.');
 const completedItem = queueItem(
   'completed',
@@ -165,6 +167,8 @@ const fixtures = {
         provenance: 'live',
         contentState: 'clear',
         relationKind: 'independent',
+        attention: 'requires_attention',
+        addressing: 'ambient',
       },
     ],
     queueItems: [attentionItem],

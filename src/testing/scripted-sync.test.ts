@@ -33,11 +33,16 @@ describe('scripted sync fixture', () => {
       clock,
     );
 
-    expect(result.ledger.activities.map(({ eventId }) => eventId)).toEqual(['$accepted']);
+    // The operator's own message is now retained as context rather than ignored, so it appears in
+    // the ledger beside the accepted one and no longer counts as a rejection.
+    expect(result.ledger.activities.map(({ eventId }) => eventId)).toEqual(['$accepted', '$self']);
+    expect(result.ledger.activities.map(({ attention }) => attention)).toEqual([
+      'requires_attention',
+      'context_only',
+    ]);
     expect(result.coverage).toMatchObject({ connection: 'ready', monitoring: 'off' });
     expect(result.ledger.ignoreCounts).toMatchObject({
       backfill_not_recovery: 1,
-      self_authored: 1,
       monitoring_off: 1,
     });
   });

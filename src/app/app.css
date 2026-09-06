@@ -1722,3 +1722,30 @@ button.is-active {
   margin: 0.15rem 0 0;
   font-size: 1.5rem;
 }
+
+/* A request addressed to the operator by name, or arriving in a room of two. It is a label and a
+   tint only: ordering, deadlines and escalation are deliberately unchanged (EVT-012), because a
+   request from one person is not more urgent than a request from three — only easier to lose. */
+.queue-card--direct {
+  border-left: 3px solid var(--coral);
+}
+
+.queue-card__direct {
+  padding: 0.08rem 0.4rem;
+  border-radius: 999px;
+  color: #7d3322;
+  background: #f7d9cf;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* The operator's own message or reaction, kept so an item's history reads as a whole conversation
+   rather than one side of one. Recessed, because it is context and never work. */
+.detail-activity-list__own {
+  opacity: 0.75;
+}
+
+.detail-activity-list__own strong {
+  font-weight: 650;
+}

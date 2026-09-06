@@ -52,6 +52,15 @@ export interface QueueItem {
   readonly reopenedCount: number;
   readonly deadline?: MaterializedDeadline | undefined;
   readonly latestActivity?: LatestActivitySummary | undefined;
+  /**
+   * Whether any activity that made this item work was addressed to the operator — it named them,
+   * or the room holds only the two of them.
+   *
+   * It deliberately affects nothing but presentation. Ordering, deadlines and escalation are
+   * unchanged, because a request from one person is not automatically more urgent than a request
+   * from three; it is only easier to lose among them (EVT-012).
+   */
+  readonly direct?: boolean | undefined;
 }
 
 export interface QueueActivity {
@@ -72,9 +81,12 @@ export interface QueueActivity {
   readonly media?: SafeMediaMetadata | undefined;
   readonly edited: boolean;
   readonly redacted: boolean;
-  readonly relationKind: 'independent' | 'thread' | 'reply';
+  readonly relationKind: 'independent' | 'thread' | 'reply' | 'reaction';
   readonly relationEventId?: string | undefined;
   readonly roomName?: string | undefined;
+  /** See `SupportedActivity['attention']`. `context_only` never becomes work. */
+  readonly attention: 'requires_attention' | 'context_only';
+  readonly addressing: 'direct' | 'ambient';
 }
 
 export interface SafeMediaMetadata {

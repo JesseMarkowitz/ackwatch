@@ -65,6 +65,8 @@ const queueItemSchema: z.ZodType<QueueItem> = z.object({
   completedAt: z.number().int().nonnegative().optional(),
   reopenedCount: z.number().int().nonnegative(),
   deadline: deadlineSchema.optional(),
+  // Presentation only, and absent on items stored before addressing was observed.
+  direct: z.boolean().optional(),
 });
 const activitySchema: z.ZodType<QueueActivity> = z.object({
   id: z.string().min(1),
@@ -99,8 +101,13 @@ const activitySchema: z.ZodType<QueueActivity> = z.object({
     .optional(),
   edited: z.boolean(),
   redacted: z.boolean(),
-  relationKind: z.enum(['independent', 'thread', 'reply']),
+  relationKind: z.enum(['independent', 'thread', 'reply', 'reaction']),
   relationEventId: z.string().startsWith('$').optional(),
+  // Absent on records written before self-authored activity was retained. Everything stored then
+  // was someone else's, because the operator's own events never reached the store, and nothing
+  // observed addressing — so these defaults describe those records correctly rather than guessing.
+  attention: z.enum(['requires_attention', 'context_only']).catch('requires_attention'),
+  addressing: z.enum(['direct', 'ambient']).catch('ambient'),
   roomName: z.string().optional(),
 });
 const transitionSchema: z.ZodType<WorkflowTransition> = z.object({
@@ -240,6 +247,8 @@ export interface AcceptedActivityInput {
   readonly decryptionFailureCode?: string;
   readonly media?: QueueActivity['media'];
   readonly relationKind?: QueueActivity['relationKind'];
+  readonly attention?: QueueActivity['attention'];
+  readonly addressing?: QueueActivity['addressing'];
   readonly relationEventId?: string;
   readonly roomName?: string;
 }
@@ -268,7 +277,12 @@ export type StorageHealth =
   | { readonly state: 'blocked' | 'closed' | 'corrupt' | 'failed'; readonly detail: string };
 
 export interface AcceptResult {
-  readonly status: 'accepted' | 'duplicate';
+  /**
+   * `context` recorded the activity against an existing item without making it work: the operator's
+   * own message or reaction, kept so the item's history shows the whole conversation. `ignored`
+   * had nowhere to record it, because no item covers that conversation.
+   */
+  readonly status: 'accepted' | 'duplicate' | 'context' | 'ignored';
   readonly itemId?: string;
 }
 
@@ -481,11 +495,24 @@ export class WorkflowRepository {
             edited: false,
             redacted: false,
             relationKind: input.relationKind ?? 'independent',
+            attention: input.attention ?? 'requires_attention',
+            addressing: input.addressing ?? 'ambient',
             ...(input.relationEventId === undefined
               ? {}
               : { relationEventId: input.relationEventId }),
             ...(input.roomName === undefined ? {} : { roomName: input.roomName }),
           });
+          // Context-only activity is a record, not work. With no item to attach it to there is no
+          // conversation for it to be part of, so it is stored against nothing and dropped: an
+          // operator's remark in a room where nothing is pending is not history AckWatch owes
+          // anyone. Where an item does exist, it is stored and the item is left exactly as it was
+          // — no reopen, no deadline, no alert, no unseen count.
+          if (input.attention === 'context_only') {
+            if (!itemRecord) return { status: 'ignored' };
+            await this.database.activities.add(activity);
+            return { status: 'context', itemId: itemRecord.id };
+          }
+
           await this.database.activities.add(activity);
           this.inject(faultAfter, 'after_activity');
 
@@ -526,8 +553,11 @@ export class WorkflowRepository {
                 ...(activity.roomName === undefined ? {} : { roomName: activity.roomName }),
               }
             : previousLatest;
+          // Sticky: an item that was ever addressed to the operator stays labelled, because the
+          // request that named them does not stop having named them when ambient traffic follows.
+          const direct = itemRecord?.direct === true || activity.addressing === 'direct';
           await this.database.queueItems.put(
-            queueItemSchema.parse({ ...mutation.item, latestActivity }),
+            queueItemSchema.parse({ ...mutation.item, latestActivity, direct }),
           );
           this.inject(faultAfter, 'after_item');
 

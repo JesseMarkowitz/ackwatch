@@ -426,6 +426,72 @@ describe('WorkflowRepository schemas, settings, and corruption', () => {
     });
   });
 
+  /*
+   * EVT-011 amended. The operator's own message belongs in the record and nowhere near the alert
+   * path: it must not create work, must not disturb a deadline, must not count as unseen, and must
+   * not reopen anything. Storing it and then filtering later would be a different bug, so this
+   * asserts both halves — that it is there, and that nothing moved.
+   */
+  it('records the operator\u2019s own message against an existing item without making it work', async () => {
+    const repository = await createRepository();
+    const accepted = await repository.acceptActivity(activity('$theirs'));
+    const before = await repository.queueItem(accountId, accepted.itemId ?? '');
+
+    // Threaded, because a thread is the only relation the item model groups by: an item is a
+    // conversation, and an ordinary reply starts its own. So the operator's own activity joins an
+    // item's history exactly where the conversation is one AckWatch is already tracking as one.
+    const own = await repository.acceptActivity(
+      activity('$mine', {
+        sender: '@monitor:example.test',
+        attention: 'context_only',
+        detectedAt: 2_000,
+        relationKind: 'thread',
+        relationEventId: '$theirs',
+      }),
+    );
+
+    expect(own).toMatchObject({ status: 'context', itemId: accepted.itemId });
+    const after = await repository.queueItem(accountId, accepted.itemId ?? '');
+    expect(after).toMatchObject({
+      activityCount: before?.activityCount,
+      unseenActivityCount: before?.unseenActivityCount,
+      lastActivityAt: before?.lastActivityAt,
+      deadline: before?.deadline,
+    });
+
+    const projection = await repository.projection(accountId);
+    expect(projection.activities.map(({ eventId }) => eventId)).toContain('$mine');
+    // No second alert: the effects are the one the item was created with.
+    expect(projection.effects.filter(({ itemId }) => itemId === accepted.itemId)).toHaveLength(1);
+  });
+
+  it('drops the operator\u2019s own message when no item covers the conversation', async () => {
+    const repository = await createRepository();
+
+    const own = await repository.acceptActivity(
+      activity('$mine', { sender: '@monitor:example.test', attention: 'context_only' }),
+    );
+
+    expect(own).toMatchObject({ status: 'ignored' });
+    const projection = await repository.projection(accountId);
+    expect(projection.items).toHaveLength(0);
+    expect(projection.activities).toHaveLength(0);
+  });
+
+  it('labels an item addressed to the operator, and keeps the label once earned', async () => {
+    const repository = await createRepository();
+    const accepted = await repository.acceptActivity(activity('$direct', { addressing: 'direct' }));
+
+    await repository.acceptActivity(
+      activity('$ambient', { addressing: 'ambient', detectedAt: 2_000 }),
+    );
+
+    // Sticky: ambient traffic arriving afterwards does not un-address the request that named them.
+    expect(await repository.queueItem(accountId, accepted.itemId ?? '')).toMatchObject({
+      direct: true,
+    });
+  });
+
   it('stamps exports with the format version a parser needs and the build a person needs', async () => {
     const repository = await createRepository();
     await repository.putSettings(defaultAccountSettings(accountId, 1_000));

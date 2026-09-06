@@ -266,6 +266,8 @@ describe('maintenance, ordering, URI, and thread identity', () => {
     edited: false,
     redacted: false,
     relationKind: 'independent',
+    attention: 'requires_attention',
+    addressing: 'ambient',
   };
 
   it('edits, redactions, and decryption enrichment do not mutate queue counters or effects', () => {

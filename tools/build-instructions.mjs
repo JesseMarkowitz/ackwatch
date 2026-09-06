@@ -212,9 +212,8 @@ hr { border: none; border-top: 1px solid var(--line); margin: 2rem 0; }
 }
 `;
 
-const source = readFileSync('instructions.md', 'utf8');
-const outputDirectory = process.argv[2] ?? 'dist';
-const page = `<!doctype html>
+export function renderInstructions(source) {
+  return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -236,10 +235,23 @@ ${render(source)
   </body>
 </html>
 `;
+}
 
-mkdirSync(dirname(join(outputDirectory, 'instructions.html')), { recursive: true });
-writeFileSync(join(outputDirectory, 'instructions.html'), page);
-writeFileSync(join(outputDirectory, 'instructions.css'), stylesheet);
-process.stdout.write(
-  `Instructions rendered to ${outputDirectory}/instructions.html (${page.length} bytes).\n`,
-);
+export const instructionsStylesheet = stylesheet;
+
+/** Exported so the dev server can render the same page the build writes, rather than a stale copy. */
+export function readInstructions() {
+  return renderInstructions(readFileSync('instructions.md', 'utf8'));
+}
+
+// Only when run as a script. Imported, this module just offers the renderer above.
+if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^.*[/\\]/u, ''))) {
+  const outputDirectory = process.argv[2] ?? 'dist';
+  const page = readInstructions();
+  mkdirSync(dirname(join(outputDirectory, 'instructions.html')), { recursive: true });
+  writeFileSync(join(outputDirectory, 'instructions.html'), page);
+  writeFileSync(join(outputDirectory, 'instructions.css'), stylesheet);
+  process.stdout.write(
+    `Instructions rendered to ${outputDirectory}/instructions.html (${page.length} bytes).\n`,
+  );
+}

@@ -656,6 +656,8 @@ export class AckWatchController implements AckWatchControllerPort {
           : { decryptionFailureCode: result.decryptionFailureCode }),
         ...(result.media === undefined ? {} : { media: result.media }),
         relationKind: result.relationKind,
+        attention: result.attention,
+        addressing: result.addressing,
         ...(result.relationEventId === undefined
           ? {}
           : { relationEventId: result.relationEventId }),

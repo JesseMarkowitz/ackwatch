@@ -21,15 +21,21 @@ export interface IngestionEnvelope {
   readonly detectedAt: number;
   readonly eligibleAtDelivery: boolean;
   readonly roomName?: string;
+  /**
+   * Whether the room is a two-person conversation. Supplied by the runtime because room membership
+   * is not on the event. A message in a room of two is addressed to the operator whether or not it
+   * names them; a message in a busy room may be addressed to nobody in particular.
+   */
+  readonly directRoom?: boolean;
 }
 
 export type IgnoreReason =
   | 'monitoring_off'
   | 'backfill_not_recovery'
   | 'duplicate_event'
-  | 'self_authored'
   | 'unsupported_event_type'
-  | 'unsupported_message_type';
+  | 'unsupported_message_type'
+  | 'unsupported_relation';
 
 export interface SupportedActivity {
   readonly kind: 'activity';
@@ -38,7 +44,8 @@ export interface SupportedActivity {
   readonly roomId: string;
   readonly sender: string;
   readonly eventType: string;
-  readonly messageType: 'm.text' | 'm.notice' | 'm.emote' | 'm.image' | 'm.file' | 'm.encrypted';
+  readonly messageType:
+    'm.text' | 'm.notice' | 'm.emote' | 'm.image' | 'm.file' | 'm.encrypted' | 'm.reaction';
   readonly preview: string;
   readonly detectedAt: number;
   readonly localSequence: number;
@@ -46,9 +53,24 @@ export interface SupportedActivity {
   readonly contentState: 'clear' | 'encrypted_placeholder' | 'unavailable';
   readonly decryptionFailureCode?: string;
   readonly media?: SafeMediaMetadata;
-  readonly relationKind: 'independent' | 'thread' | 'reply';
+  readonly relationKind: 'independent' | 'thread' | 'reply' | 'reaction';
   readonly relationEventId?: string;
   readonly roomName?: string;
+  /**
+   * Whether this activity is work, or only the record of a conversation.
+   *
+   * `context_only` activity is stored and shown in an item's history and never does anything else:
+   * it creates no item, reopens nothing, moves no deadline, and raises no alert. The operator's own
+   * messages and their own reactions are the whole of it — being alerted about your own words is
+   * absurd, but so is a history that shows one side of a conversation you took part in (EVT-011).
+   */
+  readonly attention: 'requires_attention' | 'context_only';
+  /**
+   * Whether the activity was addressed to the operator — it names them, or the room holds only the
+   * two of them. It changes nothing about ordering or deadlines by decision; it is a label the
+   * interface can show, so a direct request is recognisable among ambient traffic (EVT-012).
+   */
+  readonly addressing: 'direct' | 'ambient';
 }
 
 export interface MaintenanceMutation {
@@ -163,10 +185,42 @@ function relationOf(relatesTo: Readonly<Record<string, unknown>> | undefined): {
   const relationKind =
     relatesTo?.rel_type === 'm.thread'
       ? 'thread'
-      : relationEventId === undefined
-        ? 'independent'
-        : 'reply';
+      : relatesTo?.rel_type === 'm.annotation'
+        ? 'reaction'
+        : relationEventId === undefined
+          ? 'independent'
+          : 'reply';
   return { relationKind, ...(relationEventId === undefined ? {} : { relationEventId }) };
+}
+
+/**
+ * Whether an event is addressed to the operator.
+ *
+ * `m.mentions` is the specified mechanism (Matrix 1.7) and is checked first. The body is checked
+ * for the full user ID only — never a display name or localpart, which produce false positives on
+ * ordinary words and would label ambient traffic as direct, which is worse than labelling nothing.
+ */
+function addressingOf(
+  content: Readonly<Record<string, unknown>>,
+  ownUserId: string,
+  directRoom: boolean | undefined,
+): SupportedActivity['addressing'] {
+  if (directRoom === true) return 'direct';
+  const mentions =
+    content['m.mentions'] && typeof content['m.mentions'] === 'object'
+      ? (content['m.mentions'] as Readonly<Record<string, unknown>>)
+      : undefined;
+  const mentioned = Array.isArray(mentions?.user_ids)
+    ? mentions.user_ids.some((id) => id === ownUserId)
+    : false;
+  if (mentioned) return 'direct';
+  const body = typeof content.body === 'string' ? content.body : '';
+  return body.includes(ownUserId) ? 'direct' : 'ambient';
+}
+
+function reactionPreview(key: unknown): string {
+  const symbol = typeof key === 'string' && key.trim() ? key.trim() : 'a reaction';
+  return boundedPreview(`Reacted ${symbol}`);
 }
 
 function editPreview(content: Readonly<Record<string, unknown>>): string {
@@ -287,8 +341,39 @@ export function normalizeEnvelope(
     return { kind: 'ignored', reason: 'monitoring_off', eventId: event.eventId };
   }
 
-  if (event.sender === ownUserId) {
-    return { kind: 'ignored', reason: 'self_authored', eventId: event.eventId };
+  // Self-authored activity is retained rather than dropped. Being alerted about your own words is
+  // absurd, but a history showing one side of a conversation you took part in is a worse record
+  // (EVT-011), so it flows on as `context_only` and is filtered by disposition, not by discarding.
+  const attention: SupportedActivity['attention'] =
+    event.sender === ownUserId ? 'context_only' : 'requires_attention';
+  const addressing = addressingOf(content, ownUserId, envelope.directRoom);
+
+  // A reaction is an annotation on another event. Someone else reacting to a message — including
+  // to one of yours, which is the case that prompted this — is a response that needs attention;
+  // your own reaction is only part of the record (EVT-009, amended).
+  if (event.type === 'm.reaction') {
+    if (relatesTo?.rel_type !== 'm.annotation' || typeof relatesTo.event_id !== 'string') {
+      return { kind: 'ignored', reason: 'unsupported_relation', eventId: event.eventId };
+    }
+    return {
+      kind: 'activity',
+      accountId: envelope.accountId,
+      eventId: event.eventId,
+      roomId: event.roomId,
+      sender: event.sender,
+      eventType: 'm.reaction',
+      messageType: 'm.reaction',
+      preview: reactionPreview(relatesTo.key),
+      detectedAt: envelope.detectedAt,
+      localSequence: envelope.localSequence,
+      provenance: envelope.provenance,
+      contentState: 'clear',
+      relationKind: 'reaction',
+      relationEventId: relatesTo.event_id,
+      attention,
+      addressing,
+      ...(envelope.roomName === undefined ? {} : { roomName: envelope.roomName }),
+    };
   }
 
   if (event.type === 'm.room.encrypted') {
@@ -311,6 +396,8 @@ export function normalizeEnvelope(
       contentState: failed ? 'unavailable' : 'encrypted_placeholder',
       ...(failed ? { decryptionFailureCode: event.decryptionFailureCode } : {}),
       ...relation,
+      attention,
+      addressing,
       ...(envelope.roomName === undefined ? {} : { roomName: envelope.roomName }),
     };
   }
@@ -346,6 +433,8 @@ export function normalizeEnvelope(
     contentState: 'clear',
     ...(media === undefined ? {} : { media }),
     ...relation,
+    attention,
+    addressing,
     ...(envelope.roomName === undefined ? {} : { roomName: envelope.roomName }),
   };
 }

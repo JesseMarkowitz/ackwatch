@@ -568,12 +568,12 @@ export class MatrixRuntime {
       const raw = rawEvent(event, room);
       const roomId = raw.roomId;
       if (!roomId) {
-        this.ingestion.enqueue(this.createEnvelope(raw, 'backfill', room?.name));
+        this.ingestion.enqueue(this.createEnvelope(raw, 'backfill', room));
         return;
       }
 
       const provenance = toStartOfTimeline || !data.liveEvent ? 'backfill' : 'live';
-      const envelope = this.createEnvelope(raw, provenance, room?.name, 0);
+      const envelope = this.createEnvelope(raw, provenance, room, 0);
       const pending = this.pendingGaps.get(roomId);
       if (pending && provenance === 'live') {
         pending.buffered.push(envelope);
@@ -594,9 +594,7 @@ export class MatrixRuntime {
     try {
       const room = this.client?.getRoom(event.getRoomId() ?? '') ?? undefined;
       const update = event.isDecryptionFailure() ? 'failure' : 'success';
-      this.ingestion.enqueue(
-        this.createEnvelope(rawEvent(event, room, update), 'live', room?.name),
-      );
+      this.ingestion.enqueue(this.createEnvelope(rawEvent(event, room, update), 'live', room));
     } catch (error: unknown) {
       this.dependencies.coverage.fatal(
         error instanceof Error ? error.message : 'Decryption callback failed safely.',
@@ -748,9 +746,15 @@ export class MatrixRuntime {
   private createEnvelope(
     event: RawMatrixEvent,
     provenance: IngestionEnvelope['provenance'],
-    roomName?: string,
+    room?: Room,
     localSequence = ++this.sequence,
   ): IngestionEnvelope {
+    const roomName = room?.name;
+    // Joined membership of two is the proxy for a direct conversation. `m.direct` account data is
+    // the canonical marker, but it records what the *inviter* intended and is frequently missing
+    // or stale on rooms created by other clients, whereas the count describes the room in front of
+    // the operator. A room of two is a conversation between them whatever it was labelled as.
+    const joined = room?.getJoinedMemberCount?.();
     return {
       accountId: this.dependencies.credentials.accountId,
       event,
@@ -759,6 +763,7 @@ export class MatrixRuntime {
       detectedAt: this.dependencies.clock.now(),
       eligibleAtDelivery: this.dependencies.coverage.isEligibleForNewWork(),
       ...(roomName === undefined ? {} : { roomName }),
+      ...(joined === undefined ? {} : { directRoom: joined === 2 }),
     };
   }
 

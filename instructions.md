@@ -85,6 +85,29 @@ characters, so text beyond that point cannot be found. Both controls are deliber
 they narrow what you are reading now and are gone when the tab closes, because a filter that
 persisted would silently hide history the next time you opened the app.
 
+## Reactions, and your own messages
+
+A reaction from someone else is a response — often the only response a message gets — so it becomes
+activity on the conversation it reacts to and alerts like a message does. That includes a reaction
+to something **you** wrote.
+
+Your own messages and your own reactions are kept too, but they never alert and never create work.
+They appear in an item's history marked as yours, so a conversation you took part in reads as a
+whole rather than as one side of one.
+
+One limitation worth knowing: AckWatch groups a conversation by its thread. Your own message joins
+an item's history when it is part of that item's thread. An unrelated message you send in the same
+room belongs to no tracked conversation and is not kept.
+
+## Requests addressed to you
+
+A message that names you, or that arrives in a room holding just the two of you, is marked
+**Direct** on its card. Once an item has earned that mark it keeps it.
+
+It changes nothing else: no different ordering, no different deadline, no louder alert. A request
+from one person is not automatically more urgent than a request from three — it is only easier to
+lose among them, and the label is what makes it findable.
+
 ## What the timestamps mean
 
 Four different times appear, and they legitimately differ. A difference between them looks like a

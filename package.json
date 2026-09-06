@@ -1,6 +1,6 @@
 {
   "name": "ackwatch",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "A local-first attention monitor for Matrix",
   "license": "Apache-2.0",

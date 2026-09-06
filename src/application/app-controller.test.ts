@@ -157,6 +157,8 @@ describe('AckWatchController', () => {
       provenance: 'live',
       contentState: 'clear',
       relationKind: 'independent',
+      attention: 'requires_attention',
+      addressing: 'ambient',
     });
     emitAfterNormalized?.();
 

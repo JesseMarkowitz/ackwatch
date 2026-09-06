@@ -23,6 +23,11 @@ AckWatch server, no account, and no telemetry.
   continuity window (12 hours by default, configurable) offers the interrupted session back with
   your acknowledgements intact; an older one is archived to a redacted summary and replaced. Ending
   a session archives it the same way and clears its work, leaving your configuration alone.
+- **Reactions count as responses.** A reaction from someone else becomes activity on the
+  conversation and alerts like a message, including a reaction to something you wrote. Your own
+  reactions and messages are kept in an item's history and never alert.
+- **Requests addressed to you are labelled.** A message naming you, or arriving in a room of two, is
+  marked Direct. It is a label only: ordering, deadlines and escalation are unchanged.
 - **An alert tone you can replace.** The bundled sound is a short rising figure, inlined so nothing
   is fetched from the network. A deployment can override it by dropping `alert-tone.wav` or
   `alert-tone.mp3` beside `index.html`, with no rebuild and no setting.
@@ -73,9 +78,11 @@ These are properties of the product, not defects awaiting a fix.
   you chose rather than something assumed, and incomplete gap recovery can never appear healthy.
 - **Nothing syncs between devices.** The queue lives in the browser that built it. Another device,
   or another browser on the same machine, starts empty. There is no server to sync through.
-- **Replying in another client does not settle an item.** AckWatch does not ingest your own
-  messages, so answering from a different Matrix client leaves the item waiting until you
-  acknowledge it here.
+- **Replying in another client does not settle an item.** Your reply is recorded in the item's
+  history, but only you can decide the work is done, so the item waits until you acknowledge it
+  here.
+- **Your own activity is kept only where a conversation is tracked.** Conversations are grouped by
+  thread; a message you send that belongs to no tracked thread is not retained.
 - **AckWatch must be served over HTTPS.** Four APIs it depends on — `navigator.locks`,
   `crypto.subtle`, `Notification`, `navigator.storage` — exist only in a secure context, so a plain
   HTTP origin other than `localhost` fails at sign-in.

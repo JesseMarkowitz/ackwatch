@@ -374,9 +374,10 @@ These were decided by the developer during Phase 5 and are normative for the rem
 
 ### 8.3b Phase 5 outstanding work (as of 2026-09-03)
 
-Everything else in Phase 5 is delivered and green under `npm run check:gate4`. What remains:
+Phase 5 is delivered and green under `npm run check:gate4`. Nothing in this section remains open;
+each entry below records how it was closed.
 
-1. **Gates 1–3 still hardcode their step verdicts.** Only the Gate 4 and Gate 5 reports derive them from recorded markers. Retrofitting accepted gates is a developer decision.
+**Closed 2026-09-05: Gates 1–3 keep their hardcoded step verdicts, by decision.** Only the Gate 4 and Gate 5 reports derive verdicts from recorded markers. Retrofitting the three accepted gates would rewrite the evidence of checkpoints that were reviewed and accepted at the time, to prove again what was already accepted, and would change no decision now open. The gates that gate the release — 4 and 5 — derive their verdicts. This is settled and is not to be revisited.
 
 **Closed 2026-09-03: the six-hour soak.** Ran for its full 360 minutes with `smokeRun: false`, acknowledging 1,040 of 1,040 items across 23 reconnects with no uncaught page errors. Live timers held flat at 8 and documents at 1; heap, listeners and DOM nodes all grew linearly with retained work and none superlinearly. Gate 5 accepted it as the §8.2 longevity evidence.
 
@@ -402,7 +403,33 @@ Everything else in Phase 5 is delivered and green under `npm run check:gate4`. W
 
 **Closed 2026-09-04: configuration moved off the monitoring board.** Alert delivery, local durability, durable device security, settings export/import, diagnostics and clear-stored-data now live on a `#/settings` route reached from the top bar. Exhausted alert deliveries deliberately stayed on the board: a failed delivery is a decision waiting on the operator, not a setting.
 
-### 8.3d Open product questions raised in live testing (2026-09-04)
+### 8.3d Product questions raised in live testing (2026-09-04) — decided 2026-09-05
+
+All three were decided by the developer on 2026-09-05 and are implemented. The specification was
+amended rather than left to drift: EVT-009 is amended, EVT-010 to EVT-012 are new, and §81's
+non-goal list no longer excludes reactions.
+
+**Reactions from other people alert; your own do not; all reactions are kept in history.** A
+reaction is frequently the only response a message gets, so treating it as nothing left an answered
+message looking unanswered. It is ingested as activity on the conversation it annotates and alerts
+on the same terms as a message.
+
+**Self-authored activity is retained as context rather than dropped.** Being alerted about your own
+words is absurd; a history showing one side of a conversation you took part in is worse. Own
+messages and own reactions are stored, marked `context_only`, and shown in an item's history — and
+create nothing, reopen nothing, move no deadline, and raise no alert. This had to land before
+reactions, because the case that prompted the request is a reaction to the operator's own message.
+Its limitation is stated in EVT-011 rather than hidden: conversations are keyed by thread, so own
+activity joins an item's history where it is threaded on that item; an unrelated message in the
+same room belongs to no tracked conversation and is discarded.
+
+**Mentions and direct messages are labelled, not reordered.** A message naming the operator, or one
+arriving in a room of two, is marked `direct` and the card carries a coloured label. Ordering,
+deadlines and escalation are deliberately unchanged: a request from one person is not more urgent
+than a request from three, only easier to lose among them. Detection uses `m.mentions` or the full
+user ID and never a display name, which would match ordinary words.
+
+### 8.3d-original Open product questions raised in live testing (2026-09-04)
 
 Both were found by driving the application against a real homeserver. Neither is a defect: each is a
 decision that must be taken before the first release, and each amends a stated requirement rather

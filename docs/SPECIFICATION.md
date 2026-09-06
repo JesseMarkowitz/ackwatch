@@ -78,7 +78,10 @@ V1 targets a single operator using one Matrix account in a desktop browser to mo
 - Replacing a full Matrix chat client.
 - Composing or sending ordinary user messages from the product UI.
 - Creating rooms or managing invitations from the product UI.
-- Voice/video calling, presence, typing indicators, receipts, reactions as work, moderation, or room administration.
+- Voice/video calling, presence, typing indicators, receipts, moderation, or room administration.
+  **Amended 2026-09-05:** reactions from other people are no longer a non-goal — see EVT-009. A
+  reaction is frequently the only response a message receives, and treating it as nothing meant a
+  message that had been answered looked unanswered.
 - Monitoring while the page/browser is closed or the process is suspended.
 - Server-side push, a hosted backend, or cross-device workflow synchronization.
 - Guaranteed sound or desktop notifications in conditions where the browser or OS prevents execution.
@@ -195,7 +198,32 @@ The connection coverage states are:
 - **EVT-006** Edits to tracked events MUST update the preview/edited marker without incrementing counts, reopening, or alerting.
 - **EVT-007** Redactions of tracked events MUST preserve the audit/activity record, replace content with a tombstone, and MUST NOT decrement historical counts or alert.
 - **EVT-008** Late decryption, edit, redaction, and context enrichment of tracked work MUST be processed while monitoring is off.
-- **EVT-009** Reactions, receipts, typing, presence, membership events, and unsupported message types MUST be intentionally ignored or diagnosed; they MUST NOT silently enter the work queue.
+- **EVT-009** *(amended 2026-09-05; previously required reactions to be intentionally ignored)*
+  Receipts, typing, presence, membership events, and unsupported message types MUST be
+  intentionally ignored or diagnosed; they MUST NOT silently enter the work queue. A reaction from
+  another user MUST be ingested as activity on the conversation it annotates, and MUST alert on the
+  same terms as a message. A reaction the operator sent themselves MUST be retained as context
+  under EVT-011 and MUST NOT alert. A reaction that annotates no event MUST be diagnosed as
+  `unsupported_relation` rather than accepted.
+- **EVT-010** An activity that is not the operator's own and whose ingestion succeeds MUST be
+  eligible to create or extend work. Eligibility is carried on the activity as its attention
+  disposition, and every downstream consumer MUST filter on that disposition rather than on the
+  sender.
+- **EVT-011** *(new 2026-09-05; replaces the former rule that self-authored events be dropped)*
+  Activity the operator sent themselves MUST be retained as `context_only`: stored, and shown in
+  the history of an item whose conversation it belongs to. It MUST NOT create an item, reopen a
+  completed one, alter a deadline, increment the unseen count, or raise any alert. Where no item
+  covers its conversation, it MUST be discarded rather than stored against nothing.
+  *Consequence, stated because it is a real limitation:* conversations are keyed by thread, so the
+  operator's own activity joins an item's history when it is threaded on that item's conversation.
+  An unrelated message of theirs in the same room belongs to no tracked conversation and is
+  discarded.
+- **EVT-012** *(new 2026-09-05)* An activity that names the operator, or that arrives in a room
+  with exactly two joined members, MUST be marked `direct`. An item MUST retain the mark once any
+  of its activity has earned it. The mark MUST NOT affect ordering, deadlines, escalation, or alert
+  content; it exists so a request addressed to the operator is recognisable among ambient traffic.
+  Detection MUST use `m.mentions` or the operator's full user ID, and MUST NOT match a display name
+  or localpart, which produce false positives on ordinary words.
 
 ### 6.7 Queue identity and thread promotion
 

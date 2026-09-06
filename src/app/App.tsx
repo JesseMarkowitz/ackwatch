@@ -9,6 +9,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 
+import { copyOutcome, copyToClipboard } from './clipboard';
 import { AlertTransportError } from '../application/alert-dispatcher';
 import type { AckWatchControllerPort, AppSnapshot } from '../application/app-controller';
 import type { FoundationViewModel } from './view-model';
@@ -130,30 +131,6 @@ function coverageTone(connection: AppSnapshot['coverage']['connection']): string
  * destination has to be built here, where the configured endpoint is already on screen. Reporting
  * the bare code sent a developer looking at their network when they had mistyped a URL.
  */
-/**
- * Copies, and says whether it copied.
- *
- * `navigator.clipboard.writeText` needs a secure context and a user gesture, and can still be
- * refused by permissions policy. Reporting success without waiting on the promise would be the
- * same false claim the audio readiness indicator used to make, and the operator would find out by
- * pasting nothing. The text stays on screen either way, so a refusal costs a select-and-copy
- * rather than the export.
- */
-async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard?.writeText(text);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function copyOutcome(copied: boolean, what: string): string {
-  return copied
-    ? `${what} copied to the clipboard.`
-    : `${what} ready below \u2014 the browser refused clipboard access, so select and copy it.`;
-}
-
 /**
  * Hands the operator a file. A diagnostics report's destination is usually an attachment on a bug
  * report, and a clipboard round-trip through another application to become a file is a detour.
@@ -863,12 +840,27 @@ const QueueCard = memo(function QueueCard({
   const latest = item.latestActivity;
   return (
     <article
-      className={`queue-card ${item.needsAttention ? 'queue-card--attention' : ''}`}
+      className={`queue-card ${item.needsAttention ? 'queue-card--attention' : ''}${
+        item.direct === true ? ' queue-card--direct' : ''
+      }`}
       data-item-id={item.id}
       data-event-id={latest?.eventId}
       data-status={item.status}
     >
       <div className="queue-card__meta">
+        {/*
+          Named as well as coloured. The colour is what makes a direct request findable in a full
+          column at a glance; the word is what makes it survive a colour-blind reader, a screen
+          reader, and a greyscale screenshot. It changes no ordering and no deadline by decision.
+        */}
+        {item.direct === true ? (
+          <span
+            className="queue-card__direct"
+            title="Addressed to you by name, or in a room of two"
+          >
+            Direct
+          </span>
+        ) : null}
         <span>{latest?.roomName ?? item.roomId}</span>
         <span className="queue-card__reference" title="Reference used in external alerts">
           {itemReference(item.id)}
@@ -1247,10 +1239,18 @@ function ItemDetail({
             </p>
             <ol className="detail-activity-list" aria-label="Item activity history">
               {itemActivities.map((activity) => (
-                <li key={activity.id}>
+                <li
+                  key={activity.id}
+                  className={
+                    activity.attention === 'context_only' ? 'detail-activity-list__own' : undefined
+                  }
+                >
                   <div>
                     <strong>{activity.sender}</strong>
                     <span>{activity.relationKind}</span>
+                    {/* Your own words are in the record so the conversation reads whole; they are
+                        marked so the history cannot be mistaken for work you were alerted about. */}
+                    {activity.attention === 'context_only' ? <span>you</span> : null}
                     <time
                       className="detail-activity-list__time"
                       dateTime={new Date(activity.detectedAt).toISOString()}

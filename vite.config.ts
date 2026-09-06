@@ -2,6 +2,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 
 import { appVersionDefine } from './tools/app-version.mjs';
+import { instructionsStylesheet, readInstructions } from './tools/build-instructions.mjs';
 
 /**
  * Injects the deployment Content Security Policy as a `<meta http-equiv>` tag when
@@ -42,10 +43,41 @@ function metaContentSecurityPolicy(): Plugin {
   };
 }
 
+/**
+ * Serves the instructions page during development.
+ *
+ * The page is generated at build time, so in `vite dev` the link found no file — and Vite's SPA
+ * fallback answered with index.html, so clicking Instructions silently reopened the application
+ * with a 200. A 404 would at least have said something was wrong. This renders the same page the
+ * build writes, from the file on disk, so an edit to instructions.md shows up on reload.
+ */
+function devInstructions(): Plugin {
+  return {
+    name: 'ackwatch-dev-instructions',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        const url = (request.url ?? '').split('?')[0];
+        if (url === '/instructions.html') {
+          response.setHeader('Content-Type', 'text/html; charset=utf-8');
+          response.end(readInstructions());
+          return;
+        }
+        if (url === '/instructions.css') {
+          response.setHeader('Content-Type', 'text/css; charset=utf-8');
+          response.end(instructionsStylesheet);
+          return;
+        }
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig({
   base: './',
   define: appVersionDefine(new URL('./package.json', import.meta.url)),
-  plugins: [react(), metaContentSecurityPolicy()],
+  plugins: [react(), metaContentSecurityPolicy(), devInstructions()],
   build: {
     sourcemap: false,
     target: 'es2022',
