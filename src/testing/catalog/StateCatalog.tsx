@@ -1,8 +1,8 @@
 import { useEffect } from 'react';
 
-import type { AppSnapshot } from '../../application/app-controller';
+import type { AckWatchControllerPort, AppSnapshot } from '../../application/app-controller';
 import { App } from '../../app/App';
-import type { QueueItem } from '../../domain/queue';
+import type { QueueActivity, QueueItem } from '../../domain/queue';
 import { defaultAccountSettings } from '../../infrastructure/persistence/workflow-repository';
 
 const baseCoverage: AppSnapshot['coverage'] = {
@@ -123,6 +123,21 @@ const completedItem = queueItem(
   'COMPLETED',
   'Deployment verification finished successfully.',
 );
+
+/**
+ * A room with no name, so the card falls back to its id. Real ids are long and have nothing to
+ * break at, and every fixture using a friendly name is why a card spilling outside its column
+ * never appeared in a baseline.
+ */
+const unnamedRoomItem: QueueItem = {
+  ...queueItem('unnamed', 'COMPLETED', 'Verified the overnight batch and closed it out.'),
+  roomId: '!QzXvBnMlKjHgFdSaPoIuYtReWq0123456789:matrix.example.test',
+  latestActivity: {
+    eventId: '$unnamed',
+    sender: '@dispatch:example.test',
+    preview: 'Verified the overnight batch and closed it out.',
+  },
+};
 const encryptedItem = queueItem('encrypted', 'NEW', 'Encrypted message—waiting for keys');
 const overdueItem: QueueItem = {
   ...queueItem('overdue', 'UNACKNOWLEDGED', 'Awaiting review past the first deadline.'),
@@ -175,7 +190,7 @@ const fixtures = {
   },
   workflow: {
     ...active({ monitoring: 'armed' }),
-    queueItems: [attentionItem, openItem, completedItem],
+    queueItems: [attentionItem, openItem, completedItem, unnamedRoomItem],
   },
   overdue: {
     ...active({ monitoring: 'armed' }),
@@ -289,6 +304,88 @@ const fixtures = {
   'signed-out': signedOut,
 } satisfies Record<string, AppSnapshot>;
 
+/**
+ * The detail dialog's history is loaded from the controller rather than read off the snapshot, so
+ * the catalog has to supply one to render it at all. Only the one method is implemented: this
+ * exists to put reactions and the operator's own messages into an approved baseline, which is
+ * otherwise the one part of the interface no screenshot covers.
+ */
+const conversationActivities: readonly QueueActivity[] = [
+  {
+    id: 'activity-root',
+    accountId: attentionItem.accountId,
+    eventId: '$attention',
+    itemId: attentionItem.id,
+    roomId: attentionItem.roomId,
+    roomName: 'Operations desk',
+    sender: '@dispatch:example.test',
+    eventType: 'm.room.message',
+    messageType: 'm.text',
+    preview: 'Service check requires review before the next handoff.',
+    detectedAt: receivedAt,
+    localSequence: 1,
+    provenance: 'live',
+    contentState: 'clear',
+    edited: false,
+    redacted: false,
+    relationKind: 'independent',
+    attention: 'requires_attention',
+    addressing: 'direct',
+  },
+  {
+    id: 'activity-own',
+    accountId: attentionItem.accountId,
+    eventId: '$own-reply',
+    itemId: attentionItem.id,
+    roomId: attentionItem.roomId,
+    roomName: 'Operations desk',
+    sender: '@operator:example.test',
+    eventType: 'm.room.message',
+    messageType: 'm.text',
+    preview: 'Looking at it now — will confirm before the handoff.',
+    detectedAt: receivedAt + 120_000,
+    localSequence: 2,
+    provenance: 'live',
+    contentState: 'clear',
+    edited: false,
+    redacted: false,
+    relationKind: 'thread',
+    relationEventId: '$attention',
+    attention: 'context_only',
+    addressing: 'ambient',
+  },
+  {
+    id: 'activity-reaction',
+    accountId: attentionItem.accountId,
+    eventId: '$reaction',
+    itemId: attentionItem.id,
+    roomId: attentionItem.roomId,
+    roomName: 'Operations desk',
+    sender: '@dispatch:example.test',
+    eventType: 'm.reaction',
+    messageType: 'm.reaction',
+    preview: 'Reacted \u{1F44D}',
+    detectedAt: receivedAt + 180_000,
+    localSequence: 3,
+    provenance: 'live',
+    contentState: 'clear',
+    edited: false,
+    redacted: false,
+    relationKind: 'reaction',
+    relationEventId: '$attention',
+    attention: 'requires_attention',
+    addressing: 'ambient',
+  },
+];
+
+const catalogController = {
+  loadItemActivities: async () => conversationActivities,
+  // The dialog resolves the newest message in full from the Matrix client. There is no client
+  // here, so it reports the same unavailability a real one does when detail cannot be fetched —
+  // which is itself a state worth having in a baseline.
+  resolveEventDetail: async () => undefined,
+} as unknown as AckWatchControllerPort;
+
 export type CatalogState = keyof typeof fixtures;
 
 function isCatalogState(value: string | null): value is CatalogState {
@@ -303,5 +400,5 @@ export function StateCatalog() {
     document.documentElement.dataset.catalogState = state;
   }, [state]);
 
-  return <App snapshot={fixtures[state]} />;
+  return <App controller={catalogController} snapshot={fixtures[state]} />;
 }

@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased — V1 release candidate
+## 0.3.0 — V1 release candidate
 
 AckWatch is a local-first attention monitor for Matrix. It watches the rooms you supervise during a
 working session, turns activity that needs a response into a queue item, and keeps that item visible

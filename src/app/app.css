@@ -175,7 +175,11 @@ button:disabled {
 
 .health-strip {
   display: grid;
-  grid-template-columns: minmax(13rem, 0.75fr) minmax(48rem, 3.25fr);
+  /* The second track used to demand 48rem outright. Together with the account column and the gap
+     that set a hard floor of about 1026px on the whole page, so every window between the 800px
+     breakpoint and that floor scrolled sideways — the band most laptops sit in. The floor now
+     comes from the health grid, which reflows instead of insisting. */
+  grid-template-columns: minmax(13rem, 0.75fr) minmax(0, 3.25fr);
   gap: 2rem;
   align-items: center;
   padding: 1.2rem 0;
@@ -211,7 +215,13 @@ button:disabled {
 
 .health-grid {
   display: grid;
-  grid-template-columns: repeat(7, minmax(6.2rem, 1fr));
+  /* Auto-fit rather than seven fixed tracks: seven at 6.2rem is a 43rem floor, which the window
+     is not obliged to provide. Fewer, wider cells on a narrow screen beats a page that scrolls. */
+  /* The floor is the widest status pill ("Coverage incomplete", 9.5rem) plus the cell's rule and
+     padding. A status must not wrap, so a track narrower than its widest possible content pushed
+     the pill past the viewport — 8px of sideways scroll that appeared only in a narrow band of
+     window widths and nowhere in any baseline. */
+  grid-template-columns: repeat(auto-fit, minmax(10.75rem, 1fr));
   gap: 0.75rem;
   margin: 0;
 }
@@ -366,6 +376,8 @@ button:disabled {
 
 .fault-banner {
   display: flex;
+  /* Its recovery button is the last thing that should be pushed off a narrow screen. */
+  flex-wrap: wrap;
   gap: 1rem;
   align-items: baseline;
   margin-top: 1rem;
@@ -783,6 +795,11 @@ button:disabled {
 
 .queue-column__items {
   display: grid;
+  /* minmax(0, 1fr), not the implicit `auto`: a grid item may not shrink below its min-content
+     width by default, so one long unbreakable token — a room id, an MXID — made the card wider
+     than the column and it painted outside the frame. The fixtures all use short names, which is
+     why no baseline ever showed it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.75rem;
 }
 
@@ -801,10 +818,21 @@ button:disabled {
 .queue-card__meta,
 .queue-card__status {
   display: flex;
+  /* Wraps, because the room label is a name when the room has one and a raw id when it does not,
+     and an id has nothing to break at. */
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 0.75rem;
   color: #667370;
   font-size: 0.62rem;
+}
+
+.queue-card__meta > span,
+.queue-card__status > span {
+  /* A flex item will not shrink below its min-content width by default, so one long token pushed
+     the whole row — and everything to its right — past the viewport. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .queue-card h3 {
@@ -950,6 +978,9 @@ button:disabled {
 
 .alert-retry {
   display: flex;
+  /* An exhausted delivery is a decision waiting on the operator, so its Dismiss control has to
+     stay reachable at the narrowest width the application claims to support. */
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 1rem;
   align-items: center;
@@ -1454,7 +1485,10 @@ footer p {
 .about-panel p {
   margin: 0 0 0.9rem;
   line-height: 1.55;
-  max-width: 60ch;
+  /* Root-relative, not `ch`. A `ch` measure is relative to each element's own font size, so the
+     small attribution line at the foot resolved 60ch to 420px while the paragraphs above it
+     resolved the same rule to 600px — one measure, two widths, and the footer wrapping short. */
+  max-width: 37.5rem;
 }
 
 /* When an item arrived, on the card itself: a queue is scanned, not read. */
@@ -1528,8 +1562,16 @@ footer p {
 
 .about-facts {
   display: flex;
-  gap: 1.75rem;
+  /* Wraps to a second row rather than squeezing four columns into the measure, which broke the
+     build identifier across lines mid-token and hyphenated "Apache 2.0". */
+  flex-wrap: wrap;
+  gap: 1rem 1.75rem;
   margin: 0 0 1rem;
+}
+
+.about-facts dd {
+  margin: 0;
+  white-space: nowrap;
 }
 
 .about-facts dt {

@@ -478,6 +478,64 @@ describe('WorkflowRepository schemas, settings, and corruption', () => {
     expect(projection.activities).toHaveLength(0);
   });
 
+  it('groups a reaction with the item that owns the message it annotates', async () => {
+    const repository = await createRepository();
+    const target = await repository.acceptActivity(activity('$target'));
+
+    const reaction = await repository.acceptActivity(
+      activity('$reaction', {
+        eventType: 'm.reaction',
+        messageType: 'm.reaction',
+        preview: 'Reacted \u{1F44D}',
+        relationKind: 'reaction',
+        relationEventId: '$target',
+        detectedAt: 2_000,
+      }),
+    );
+
+    // A reaction is a response within a conversation, not a new one. An item per thumbs-up would
+    // bury the work it was reacting to.
+    expect(reaction.itemId).toBe(target.itemId);
+    const projection = await repository.projection(accountId);
+    expect(projection.items).toHaveLength(1);
+  });
+
+  it('makes work of a reaction to a message that had none, and groups later ones with it', async () => {
+    const repository = await createRepository();
+    // The operator's own message: retained nowhere, because no item covers it.
+    await repository.acceptActivity(
+      activity('$mine', { sender: '@monitor:example.test', attention: 'context_only' }),
+    );
+
+    const first = await repository.acceptActivity(
+      activity('$reaction-one', {
+        eventType: 'm.reaction',
+        messageType: 'm.reaction',
+        preview: 'Reacted \u{1F44D}',
+        relationKind: 'reaction',
+        relationEventId: '$mine',
+        detectedAt: 2_000,
+      }),
+    );
+    const second = await repository.acceptActivity(
+      activity('$reaction-two', {
+        eventType: 'm.reaction',
+        messageType: 'm.reaction',
+        preview: 'Reacted \u{1F389}',
+        relationKind: 'reaction',
+        relationEventId: '$mine',
+        detectedAt: 3_000,
+      }),
+    );
+
+    // Someone responding to your message is the case reactions were added for, and it has to
+    // become work even though your message never did.
+    expect(first.status).toBe('accepted');
+    expect(second.itemId).toBe(first.itemId);
+    const projection = await repository.projection(accountId);
+    expect(projection.items).toHaveLength(1);
+  });
+
   it('labels an item addressed to the operator, and keeps the label once earned', async () => {
     const repository = await createRepository();
     const accepted = await repository.acceptActivity(activity('$direct', { addressing: 'direct' }));

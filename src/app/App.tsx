@@ -1369,8 +1369,26 @@ function AboutPanel({ close }: { readonly close: () => void }) {
             <dd>{__ACKWATCH_VERSION__}</dd>
           </div>
           <div>
+            {/* The tree this bundle was built from. A deployment being diagnosed needs to say which
+                build it is running, not only which release it belongs to. */}
+            <dt>Build</dt>
+            <dd>{__ACKWATCH_BUILD__}</dd>
+          </div>
+          <div>
             <dt>License</dt>
             <dd>Apache 2.0</dd>
+          </div>
+          <div>
+            <dt>Source</dt>
+            <dd>
+              <a
+                href="https://github.com/JesseMarkowitz/ackwatch"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                github.com/JesseMarkowitz/ackwatch
+              </a>
+            </dd>
           </div>
         </dl>
         <p className="field-help">

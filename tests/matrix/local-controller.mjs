@@ -192,6 +192,17 @@ async function sendEncryptedMessage(client, roomId, content) {
   return await client.sendEvent(roomId, 'm.room.message', content);
 }
 
+async function sendReaction(roomId, token, targetEventId, key, marker) {
+  return await matrixRequest(
+    `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.reaction/${encodeURIComponent(`${runId}-${marker}`)}`,
+    {
+      method: 'PUT',
+      token,
+      body: { 'm.relates_to': { rel_type: 'm.annotation', event_id: targetEventId, key } },
+    },
+  );
+}
+
 async function redactEvent(roomId, token, eventId, marker) {
   return await matrixRequest(
     `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/redact/${encodeURIComponent(eventId)}/${encodeURIComponent(`${runId}-${marker}`)}`,
@@ -208,6 +219,20 @@ async function loginInBrowser(page, userId, password) {
   await page.getByTestId('password-form').waitFor();
   await page.getByLabel('Password').fill(password);
   await page.getByRole('button', { name: 'Sign in' }).click();
+}
+
+async function openSettings(page) {
+  const toSettings = page.getByRole('button', { name: 'Settings', exact: true });
+  if ((await toSettings.count()) > 0) await toSettings.click();
+  await page
+    .getByRole('heading', { name: 'Alerts, this device, and your data' })
+    .waitFor({ timeout: 30_000 });
+}
+
+async function openBoard(page) {
+  const toBoard = page.getByRole('button', { name: 'Board', exact: true });
+  if ((await toBoard.count()) > 0) await toBoard.click();
+  await page.getByRole('heading', { name: 'Attention queue' }).waitFor({ timeout: 30_000 });
 }
 
 async function waitForProcessed(page, eventId) {
@@ -339,6 +364,7 @@ async function main() {
   manifest.assertions.push('baseline-excluded');
   await page.screenshot({ path: resolve(artifactsDirectory, 'real-ready.png'), fullPage: true });
 
+  await openSettings(page);
   await page.getByText('Set up cross-signing, secret storage, and key backup').click();
   await page
     .getByLabel('Current Matrix password for one-time authorization')
@@ -356,9 +382,10 @@ async function main() {
     .getByText('Enabled', { exact: true })
     .waitFor();
   manifest.assertions.push('cross-signing-secret-storage-key-backup-setup');
+  await openBoard(page);
 
   await startButton.click();
-  await page.getByText('Monitoring is armed').waitFor();
+  await page.getByText('Monitoring armed', { exact: true }).waitFor();
   const accepted = await sendMessage(room.room_id, senderA.access_token, 'post-arm');
   manifest.eventIds.accepted = accepted.event_id;
   await page.locator(`[data-event-id="${accepted.event_id}"]`).waitFor({ timeout: 30_000 });
@@ -441,10 +468,117 @@ async function main() {
   manifest.eventIds.selfAuthored = selfEvent.event_id;
   await waitForProcessed(page, selfEvent.event_id);
   if ((await page.locator(`[data-event-id="${selfEvent.event_id}"]`).count()) !== 0) {
-    throw new Error('A self-authored event entered the developer ledger.');
+    throw new Error('A self-authored event became work.');
   }
-  manifest.assertions.push('self-authored-excluded');
+  // EVT-011: it is retained, not ingested-and-hidden — but only where a conversation covers it,
+  // and an independent message of the operator's covers none, so nothing is stored for this one.
+  manifest.assertions.push('self-authored-creates-no-work');
   await page.screenshot({ path: resolve(artifactsDirectory, 'real-received.png'), fullPage: true });
+
+  // EVT-011 against a real homeserver: the operator's own reply inside a tracked conversation is
+  // kept and shown in that item's history, and moves nothing about the item.
+  const contextRoot = await sendMessage(room.room_id, senderB.access_token, 'context-root');
+  manifest.eventIds.contextRoot = contextRoot.event_id;
+  const contextCard = page.locator(`[data-event-id="${contextRoot.event_id}"]`);
+  await contextCard.waitFor({ timeout: 30_000 });
+  const ownReplyBody = `Synthetic own reply ${runId}`;
+  const ownReply = await sendMessage(room.room_id, monitor.access_token, 'own-reply', {
+    msgtype: 'm.text',
+    body: ownReplyBody,
+    'm.relates_to': {
+      rel_type: 'm.thread',
+      event_id: contextRoot.event_id,
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: contextRoot.event_id },
+    },
+  });
+  manifest.eventIds.ownReply = ownReply.event_id;
+  await waitForProcessed(page, ownReply.event_id);
+  if ((await page.locator(`[data-event-id="${ownReply.event_id}"]`).count()) !== 0) {
+    throw new Error("The operator's own reply was promoted to the newest activity on a card.");
+  }
+  await contextCard.getByRole('button', { name: 'View details' }).click();
+  const contextDialog = page.getByRole('dialog');
+  // The history list specifically. The dialog also renders the newest message of the conversation
+  // in full, which is now the operator's own reply, so an unscoped match finds it twice.
+  await contextDialog
+    .locator('.detail-activity-list')
+    .getByText(ownReplyBody)
+    .waitFor({ timeout: 15_000 });
+  await page.screenshot({
+    path: resolve(artifactsDirectory, 'real-own-context.png'),
+    fullPage: true,
+  });
+  await contextDialog.getByRole('button', { name: 'Close details' }).click();
+  manifest.assertions.push('own-reply-kept-as-context-without-becoming-work');
+
+  // EVT-009 against a real homeserver, in both directions, and the case the change was made for:
+  // a reaction to the operator's own message, which never had an item of its own.
+  const ownForReaction = await sendMessage(room.room_id, monitor.access_token, 'own-reacted-to');
+  manifest.eventIds.ownReactedTo = ownForReaction.event_id;
+  await waitForProcessed(page, ownForReaction.event_id);
+  const theirReaction = await sendReaction(
+    room.room_id,
+    senderB.access_token,
+    ownForReaction.event_id,
+    '\u{1F44D}',
+    'their-reaction',
+  );
+  manifest.eventIds.theirReaction = theirReaction.event_id;
+  // Keyed by the reaction, because the reaction is the activity that made this work: the message
+  // it annotates is the operator's own and never became an activity of its own.
+  const reactionCard = page.locator(`[data-event-id="${theirReaction.event_id}"]`);
+  await reactionCard.waitFor({ timeout: 30_000 });
+  await reactionCard.getByText('Needs attention', { exact: true }).waitFor();
+  await page.screenshot({
+    path: resolve(artifactsDirectory, 'real-reaction.png'),
+    fullPage: true,
+  });
+  manifest.assertions.push('reaction-to-own-message-becomes-work');
+
+  // A second reaction joins that work rather than arriving as another card.
+  const cardsBefore = await page.locator('[data-item-id]').count();
+  const secondReaction = await sendReaction(
+    room.room_id,
+    senderB.access_token,
+    ownForReaction.event_id,
+    '\u{1F389}',
+    'second-reaction',
+  );
+  manifest.eventIds.secondReaction = secondReaction.event_id;
+  await waitForProcessed(page, secondReaction.event_id);
+  if ((await page.locator('[data-item-id]').count()) !== cardsBefore) {
+    throw new Error('A second reaction to the same message created another queue item.');
+  }
+  manifest.assertions.push('reactions-group-with-the-message-they-annotate');
+
+  // The operator's own reaction is context and must never become work.
+  const ownReaction = await sendReaction(
+    room.room_id,
+    monitor.access_token,
+    contextRoot.event_id,
+    '\u2705',
+    'own-reaction',
+  );
+  manifest.eventIds.ownReaction = ownReaction.event_id;
+  await waitForProcessed(page, ownReaction.event_id);
+  if ((await page.locator(`[data-event-id="${ownReaction.event_id}"]`).count()) !== 0) {
+    throw new Error("The operator's own reaction became work.");
+  }
+  manifest.assertions.push('own-reaction-creates-no-work');
+
+  // EVT-012: a message naming the operator is labelled, and ordering is untouched by it.
+  const mention = await sendMessage(room.room_id, senderB.access_token, 'mention', {
+    msgtype: 'm.text',
+    body: `${monitor.user_id} can you take this ${runId}`,
+    'm.mentions': { user_ids: [monitor.user_id] },
+  });
+  manifest.eventIds.mention = mention.event_id;
+  const mentionCard = page.locator(`[data-event-id="${mention.event_id}"]`);
+  await mentionCard.waitFor({ timeout: 30_000 });
+  await mentionCard.getByText('Direct', { exact: true }).waitFor();
+  await page.screenshot({ path: resolve(artifactsDirectory, 'real-direct.png'), fullPage: true });
+  manifest.assertions.push('message-naming-the-operator-is-labelled-direct');
 
   await page.getByRole('button', { name: 'Stop monitoring' }).click();
   const stopped = await sendMessage(room.room_id, senderB.access_token, 'stopped-window');
@@ -565,12 +699,14 @@ async function main() {
   await page.locator(`[data-event-id="${rearmed.event_id}"]`).waitFor({ timeout: 30_000 });
   await page.locator(`[data-event-id="${encryptedThread.event_id}"]`).waitFor({ timeout: 30_000 });
   manifest.assertions.push('reload-restores-workflow');
+  await openSettings(page);
   await page
     .getByText('Crypto engine', { exact: true })
     .locator('..')
     .getByText('ready', { exact: true })
     .waitFor({ timeout: 30_000 });
   manifest.assertions.push('reload-restores-persistent-crypto-device');
+  await openBoard(page);
 
   const secondPage = await context.newPage();
   await loginInBrowser(secondPage, monitor.user_id, passwords.get('monitor'));
@@ -600,6 +736,7 @@ async function main() {
   await waitForReady(page);
   // The replacement session is authorized again, so authorization failures stop being expected.
   scenarioPhase = 'recovered-session';
+  await openSettings(page);
   await page.getByText('Restore from a recovery key').click();
   await page.getByLabel('Recovery key').fill(recoveryKey);
   await page.getByRole('button', { name: 'Restore security secrets' }).click();

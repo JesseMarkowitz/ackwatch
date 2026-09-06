@@ -417,11 +417,21 @@ export class WorkflowRepository {
             settings = defaultAccountSettings(input.accountId, input.detectedAt);
             await this.database.settings.add(settings);
           }
-          const eventKey = conversationKeyFor(input.roomId, input.eventId);
+          // A reaction belongs to the conversation of the message it annotates, not to one of its
+          // own. Keyed by its own event id it created a fresh queue item per reaction, so a
+          // thumbs-up would arrive as a card of its own and bury the work it was reacting to.
+          // Where the annotated message has no item — the operator's own message, which is the
+          // case reactions were added for — the item created is keyed to that message, so further
+          // reactions to it group rather than multiply.
+          const conversationEventId =
+            input.relationKind === 'reaction' && input.relationEventId
+              ? input.relationEventId
+              : input.eventId;
+          const eventKey = conversationKeyFor(input.roomId, conversationEventId);
           const rootEventId = input.relationKind === 'thread' ? input.relationEventId : undefined;
           const threadKey = rootEventId
-            ? conversationKeyFor(input.roomId, input.eventId, rootEventId)
-            : conversationKeyFor(input.roomId, input.eventId, input.eventId);
+            ? conversationKeyFor(input.roomId, conversationEventId, rootEventId)
+            : conversationKeyFor(input.roomId, conversationEventId, conversationEventId);
           const eventConversation = await this.database.conversationKeys.get(
             recordId(input.accountId, eventKey),
           );
@@ -532,7 +542,7 @@ export class WorkflowRepository {
                 accountId: input.accountId,
                 conversationKey: activeKey,
                 roomId: input.roomId,
-                eventId: input.eventId,
+                eventId: conversationEventId,
                 cycleId: this.idFactory(),
                 detectedAt: input.detectedAt,
                 settings: queueSettings(settings),
