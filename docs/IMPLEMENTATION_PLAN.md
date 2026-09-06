@@ -423,6 +423,15 @@ Its limitation is stated in EVT-011 rather than hidden: conversations are keyed 
 activity joins an item's history where it is threaded on that item; an unrelated message in the
 same room belongs to no tracked conversation and is discarded.
 
+**Amended 2026-09-06, from real use.** A reaction to a threaded message opened a second item for a
+conversation already tracked: reactions were resolved by a key derived from the annotated event,
+and a threaded message belongs to an item keyed by the thread root. A reaction now joins the item
+holding the message it annotates, found through the message itself. The developer also decided that
+a reaction on completed work **reopens** it, on the same terms as any other activity — the
+application cannot read what a reaction means, so treating a thumbs-up as "all good" would risk
+missing a real response on an assumption it is in no position to make. Recorded in EVT-009 and
+pinned by a test rather than left as a consequence of the general reopen rule.
+
 **Mentions and direct messages are labelled, not reordered.** A message naming the operator, or one
 arriving in a room of two, is marked `direct` and the card carries a coloured label. Ordering,
 deadlines and escalation are deliberately unchanged: a request from one person is not more urgent
@@ -593,6 +602,10 @@ A milestone is done only when:
 - Cross-device workflow synchronization and conflict resolution.
 - Multi-account active UI.
 - Server push/service-worker closed-page monitoring.
+- **Friendly display names on cards.** Considered 2026-09-06 and declined: not important enough to
+  justify the change. Worth recording that it is not an oversight, and that if it is ever revisited
+  the display name must accompany the user ID rather than replace it — display names are unverified,
+  mutable and per-room, so a name alone would let one member present as another.
 - **Notifications on iOS ("PWA tier 2").** V1 ships tier 1: a web app manifest and icons, so the
   application installs to an iOS home screen and runs without browser chrome. That is a layout and
   packaging change only — there is no service worker, and installing alters no behaviour.

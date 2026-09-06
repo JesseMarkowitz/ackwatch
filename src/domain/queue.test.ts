@@ -266,6 +266,7 @@ describe('maintenance, ordering, URI, and thread identity', () => {
     edited: false,
     redacted: false,
     relationKind: 'independent',
+    encrypted: false,
     attention: 'requires_attention',
     addressing: 'ambient',
   };

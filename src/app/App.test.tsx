@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import axe from 'axe-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -111,6 +111,7 @@ describe('foundation shell', () => {
           edited: false,
           redacted: false,
           relationKind: 'independent',
+          encrypted: false,
           attention: 'requires_attention',
           addressing: 'ambient',
         },
@@ -152,7 +153,7 @@ describe('foundation shell', () => {
         redacted: false,
       }),
       bootstrapCryptoSecurity: async () => 'recovery-key',
-      restoreCryptoSecurity: async () => undefined,
+      restoreCryptoSecurity: async () => 0,
       requestOwnDeviceVerification: async () => undefined,
       acceptVerificationRequest: async () => undefined,
       startSasVerification: async () => undefined,
@@ -162,6 +163,11 @@ describe('foundation shell', () => {
     };
     const user = userEvent.setup();
     const { container } = render(<App controller={controller} />);
+
+    // The browser tab counts work needing attention, which is where an operator looking elsewhere
+    // notices it. The formatting itself is covered in document-title.test.ts; this proves the
+    // effect is wired to a real snapshot.
+    await waitFor(() => expect(document.title).toBe('(1) AckWatch'));
 
     expect(container.querySelector('b')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'View details' }));

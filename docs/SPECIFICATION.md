@@ -204,7 +204,13 @@ The connection coverage states are:
   another user MUST be ingested as activity on the conversation it annotates, and MUST alert on the
   same terms as a message. A reaction the operator sent themselves MUST be retained as context
   under EVT-011 and MUST NOT alert. A reaction that annotates no event MUST be diagnosed as
-  `unsupported_relation` rather than accepted.
+  `unsupported_relation` rather than accepted. A reaction MUST join the item that already holds the
+  message it annotates, found through that message rather than through a key derived from it, since
+  a message inside a thread belongs to an item keyed by the thread root. A reaction arriving on
+  completed work MUST reopen it on a new cycle, exactly as any other activity does: the application
+  cannot read what a reaction means, a thumbs-up may be agreement or may be the only response an
+  important question receives, and only the operator can tell which. Reopening costs a glance;
+  declining to reopen risks a missed input on an assumption the code is in no position to make.
 - **EVT-010** An activity that is not the operator's own and whose ingestion succeeds MUST be
   eligible to create or extend work. Eligibility is carried on the activity as its attention
   disposition, and every downstream consumer MUST filter on that disposition rather than on the

@@ -91,6 +91,12 @@ A reaction from someone else is a response — often the only response a message
 activity on the conversation it reacts to and alerts like a message does. That includes a reaction
 to something **you** wrote.
 
+A reaction joins the conversation it reacts to rather than starting a new one — including when the
+message it reacts to is inside a thread. **A reaction on work you have already completed reopens
+it.** That is deliberate: AckWatch cannot tell whether a thumbs-up means "all good" or is the only
+response an important question received, and only you can, so it puts the item back in front of you
+rather than deciding for you.
+
 Your own messages and your own reactions are kept too, but they never alert and never create work.
 They appear in an item's history marked as yours, so a conversation you took part in reads as a
 whole rather than as one side of one.
@@ -98,6 +104,23 @@ whole rather than as one side of one.
 One limitation worth knowing: AckWatch groups a conversation by its thread. Your own message joins
 an item's history when it is part of that item's thread. An unrelated message you send in the same
 room belongs to no tracked conversation and is not kept.
+
+## The browser tab
+
+While anything needs attention, the tab title carries the count — `(3) AckWatch`. It counts only
+work you have not looked at yet; acknowledged work is not counted, because you have already seen it.
+The count reads the same whether or not the tab is focused, and it disappears when nothing is
+waiting.
+
+## Encrypted conversations on the board
+
+A card from an end-to-end encrypted room carries an **Encrypted** label. Once keys arrive a
+decrypted message reads exactly like a plaintext one, so without the label there is no way to tell
+which protection a conversation had.
+
+The label describes the **room**, not this device. AckWatch stores the preview unencrypted in your
+browser either way — encryption protects the message in transit and on the server, and **Clear
+stored data** is what removes it from here.
 
 ## Requests addressed to you
 
@@ -173,6 +196,15 @@ failed alert is a decision waiting on you, not a preference. The reason is repor
 actually happened — an unreachable server, a refused credential, or a destination this deployment's
 policy does not permit — rather than as a guess.
 
+## Pictures and attachments
+
+A picture posted with no words is work like any other message. Its card reads **Picture** — with the
+filename when the sender's client provided one — so a post that is only an image is recognisable
+without opening it. Files read **File**, and stickers read **Sticker**.
+
+If a picture does not appear at all, the usual causes are the same as for any message: monitoring
+was not armed when it arrived, or you posted it yourself.
+
 ## Message previews
 
 A stored preview keeps at most 160 characters of message text, so that little plaintext rests on
@@ -184,11 +216,74 @@ messages in a thread are shown as their stored previews.
 
 ## Encrypted rooms
 
-AckWatch creates a persistent Matrix device with cross-signing, secret storage, and key backup, and
-supports emoji device verification. Messages it cannot decrypt appear as placeholders rather than
-being dropped, so an encrypted room never looks empty when it is not.
+AckWatch signs in as its own Matrix device. Like any new device, it starts with no keys, so messages
+in encrypted rooms arrive as placeholders reading **waiting for keys** — recorded and alerted on,
+but unreadable until the keys reach it. They are never silently dropped, so an encrypted room does
+not look empty when it is not.
 
-Verify the AckWatch device from another of your Matrix clients to let it read encrypted history.
+There are two ways to give it keys, and you only need one.
+
+### If you have your recovery key
+
+Settings → **Durable device security** → **Restore from a recovery key**. Paste the key and press
+**Restore security secrets**.
+
+This does more than its name suggests: it reads your secret storage, signs this device with your
+cross-signing identity — which is what makes other people's clients willing to share keys with it —
+and connects it to your existing key backup so earlier messages can be decrypted.
+
+### If you do not have your recovery key
+
+Verify the AckWatch session from another of your Matrix clients — in Element, Settings → Security &
+Privacy → Other sessions → **Verify session**, then compare the emoji. AckWatch shows the same emoji
+and its own confirm button.
+
+**Picking the right session in that list.** AckWatch signs in for the session only, so every sign-in
+creates a new Matrix device and several AckWatch sessions build up over time. The one you are
+looking at is named under **This device** at the top of Durable device security; match that id
+against the list in your other client. Sessions you no longer recognise can be signed out from
+there.
+
+Verification does two things: it marks this device as trusted, so keys for **new** messages are
+shared with it from then on, and it lets this device ask your other device for your secrets, which
+normally includes the key-backup key — so older messages usually become readable too.
+
+### Do not use "Set up cross-signing, secret storage, and key backup" for this
+
+That control is for an account that has **no** security set up yet. It creates a **new** recovery key
+and a **new** key backup, which replaces what your other clients already use and invalidates the
+recovery key you saved. If your account already has security set up, restore or verify instead.
+
+### What the security tiles mean
+
+| Tile                    | What it measures                                                                                                                               | If it is not ready                                                                                                                                                              |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Crypto engine**       | Whether the encryption engine started at all.                                                                                                  | `fault` means encryption is unavailable in this browser; nothing else on this panel will work.                                                                                  |
+| **Cross-signing**       | Whether this device is signed by your account identity — that is, whether other clients treat it as **yours**. Ready means verified.           | Restore from your recovery key, or verify the session from another client.                                                                                                      |
+| **Secret storage**      | Whether AckWatch can read your account's stored secrets.                                                                                       | Restore from your recovery key.                                                                                                                                                 |
+| **Key backup**          | Whether this device is connected to your account's key backup — the store other clients call **key storage** — and can pull room keys from it. | Switch key storage on in another Matrix client, then restore here again. A backup can only be created by a client that already holds keys, so AckWatch cannot make one for you. |
+| **Device verification** | The state of a verification exchange **happening right now**, not whether the device is trusted. `idle` simply means none is in progress.      | Nothing. Trust is reported by Cross-signing, not here.                                                                                                                          |
+
+### Knowing whether it worked
+
+The tiles at the top of Durable device security are the authoritative answer, and they persist:
+**Cross-signing** and **Secret storage** should read Ready, and **Key backup** should read Enabled.
+The message beside the button tells you what happened; the tiles tell you where you ended up.
+
+Keys arrive asynchronously, and what happens to messages already in your queue depends on when they
+were stored.
+
+- Placeholders ingested **during this page's session** repair themselves as their keys turn up.
+- Placeholders from **before a reload** do not repair on their own. The decryption arrives against a
+  message the reload discarded, so nothing links it back. **Open the item** — that decrypts it on
+  demand and writes the result back, so the card mends itself once you look at it. If the message is
+  too old to still be loaded in the Matrix client, it stays a placeholder.
+
+**One thing keys cannot fix:** a message that was never captured. If AckWatch was not armed when a
+message arrived, or the message reached it as history rather than as live traffic, no placeholder
+was created — and decryption repairs a placeholder rather than creating one. Such a message stays
+absent however many keys arrive later. The diagnostics export's `ignoredThisRunByReason` says
+whether that is what happened.
 
 ## Work sessions
 
@@ -217,7 +312,10 @@ needs attention.
   status says so and you can select it yourself. An imported file never enables a webhook, so
   importing cannot start sending to a destination you have not confirmed.
 - **Diagnostics** — a report describing how this installation is behaving using counts, codes and
-  timings only. It carries no message text, room or event identifiers, senders, or webhook
+  timings only. It includes `ignoredThisRunByReason`, which says how many events were seen and not
+  turned into work, and why — `monitoring_off` for anything that arrived before you armed,
+  `unsupported_event_type` for an event kind AckWatch does not handle. Those counts cover the
+  current run only and reset when the page reloads. It carries no message text, room or event identifiers, senders, or webhook
   destination, so it is safe to attach to a bug report. **Download diagnostics** saves it as a file;
   **Export diagnostics** copies it and shows it for reading.
 - **Clear stored data** — permanently deletes this account's queue, history and settings on this

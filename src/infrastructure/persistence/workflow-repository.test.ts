@@ -500,6 +500,70 @@ describe('WorkflowRepository schemas, settings, and corruption', () => {
     expect(projection.items).toHaveLength(1);
   });
 
+  /*
+   * Found in real use: a post, a threaded reply that was acknowledged and completed, then a
+   * reaction to that reply — which arrived as a second item for a conversation already tracked.
+   * A reaction was resolved by a key derived from the annotated event, and a message inside a
+   * thread belongs to an item keyed by the thread root, so the derived key never matched.
+   */
+  it('joins a reaction to the thread that already holds the message it annotates', async () => {
+    const repository = await createRepository();
+    const root = await repository.acceptActivity(activity('$root'));
+    const reply = await repository.acceptActivity(
+      activity('$reply', { relationKind: 'thread', relationEventId: '$root', detectedAt: 2_000 }),
+    );
+    expect(reply.itemId).toBe(root.itemId);
+
+    const reaction = await repository.acceptActivity(
+      activity('$reaction', {
+        eventType: 'm.reaction',
+        messageType: 'm.reaction',
+        preview: 'Reacted \u{1F44D}',
+        relationKind: 'reaction',
+        // The reply, which is inside the thread rather than being a conversation of its own.
+        relationEventId: '$reply',
+        detectedAt: 3_000,
+      }),
+    );
+
+    expect(reaction.itemId).toBe(root.itemId);
+    const projection = await repository.projection(accountId);
+    expect(projection.items).toHaveLength(1);
+  });
+
+  /*
+   * Decided 2026-09-06, and pinned here because it is a decision rather than a consequence of the
+   * general reopen rule. A reaction carries no meaning the application can read: a thumbs-up may
+   * mean "all good" or may be the only response an important question receives, and only the
+   * operator can tell which by looking at the conversation. Reopening costs a glance; not
+   * reopening risks a missed input on an assumption the code is in no position to make.
+   */
+  it('reopens completed work when a reaction arrives on it', async () => {
+    const repository = await createRepository();
+    const root = await repository.acceptActivity(activity('$root'));
+    const itemId = root.itemId ?? '';
+    await repository.applyCommand(accountId, itemId, { kind: 'complete', at: 2_000 });
+    const completed = await repository.queueItem(accountId, itemId);
+    expect(completed?.status).toBe('COMPLETED');
+
+    await repository.acceptActivity(
+      activity('$reaction', {
+        eventType: 'm.reaction',
+        messageType: 'm.reaction',
+        preview: 'Reacted \u{1F44D}',
+        relationKind: 'reaction',
+        relationEventId: '$root',
+        detectedAt: 5_000,
+      }),
+    );
+
+    const reopened = await repository.queueItem(accountId, itemId);
+    expect(reopened).toMatchObject({ status: 'NEW', reopenedCount: 1 });
+    // The same item, reopened on a new cycle — not a second one.
+    expect(reopened?.id).toBe(itemId);
+    expect(reopened?.cycleId).not.toBe(completed?.cycleId);
+  });
+
   it('makes work of a reaction to a message that had none, and groups later ones with it', async () => {
     const repository = await createRepository();
     // The operator's own message: retained nowhere, because no item covers it.
@@ -874,6 +938,58 @@ describe('diagnostics and cleanup', () => {
       queue: { items: 1, itemsByStatus: { NEW: 1 } },
       configuration: { webhookEnabled: true, webhookPreset: 'generic' },
     });
+  });
+
+  it('repairs a stored placeholder when its content is decrypted later', async () => {
+    const repository = await createRepository();
+    const accepted = await repository.acceptActivity(
+      activity('$encrypted', {
+        eventType: 'm.room.encrypted',
+        messageType: 'm.encrypted',
+        preview: 'Encrypted message\u2014waiting for keys',
+        contentState: 'encrypted_placeholder',
+      }),
+    );
+
+    expect(await repository.activity(accountId, '$encrypted')).toMatchObject({
+      contentState: 'encrypted_placeholder',
+    });
+
+    await repository.applyMaintenance(accountId, '$encrypted', {
+      kind: 'enrich_decrypted_content',
+      preview: 'The window is confirmed for Thursday.',
+      messageType: 'm.text',
+    });
+
+    // Keys arriving after a reload cannot repair a placeholder on their own: the decryption event
+    // fires on a MatrixEvent the reload discarded. Opening the item decrypts on demand, and that
+    // result is written back here rather than being shown once and forgotten.
+    expect(await repository.activity(accountId, '$encrypted')).toMatchObject({
+      contentState: 'clear',
+      preview: 'The window is confirmed for Thursday.',
+      messageType: 'm.text',
+    });
+    expect(accepted.status).toBe('accepted');
+  });
+
+  it('reports why events were declined, which the report could not say at all', async () => {
+    const repository = await createRepository();
+    await repository.acceptActivity(activity('$kept'));
+
+    const report: unknown = JSON.parse(
+      await repository.diagnosticsReport(accountId, 10_000, {
+        unsupported_event_type: 2,
+        monitoring_off: 5,
+      }),
+    );
+
+    // The first question about a message that never appeared is why it never appeared, and the
+    // report had no field that could answer it.
+    expect(report).toMatchObject({
+      ingestion: { ignoredThisRunByReason: { unsupported_event_type: 2, monitoring_off: 5 } },
+    });
+    // Reasons are AckWatch's own vocabulary; nothing about the events themselves travels with them.
+    expect(JSON.stringify(report)).not.toContain('$kept');
   });
 
   it('ages out finished diagnostics but never live work or unresolved issues', async () => {

@@ -10,6 +10,7 @@ import {
 } from 'react';
 
 import { copyOutcome, copyToClipboard } from './clipboard';
+import { documentTitleFor } from './document-title';
 import { AlertTransportError } from '../application/alert-dispatcher';
 import type { AckWatchControllerPort, AppSnapshot } from '../application/app-controller';
 import type { FoundationViewModel } from './view-model';
@@ -537,6 +538,18 @@ function CryptoSecurityPanel({
         </p>
       </div>
       <dl className="crypto-status">
+        {snapshot.deviceLabel === undefined ? null : (
+          <div>
+            {/*
+              The id another Matrix client lists this session under. Verification asks you to pick
+              the right session in that client's list, and a session-only sign-in creates a new
+              device each time — so several AckWatch sessions accumulate and nothing on this side
+              said which one you are looking at.
+            */}
+            <dt>This device</dt>
+            <dd className="crypto-status__device">{snapshot.deviceLabel}</dd>
+          </div>
+        )}
         <div>
           <dt>Crypto engine</dt>
           <dd>{snapshot.crypto.state}</dd>
@@ -592,12 +605,18 @@ function CryptoSecurityPanel({
                   setGeneratedRecoveryKey(key);
                   setStatus('Security setup completed. Save the recovery key now.');
                 },
-                () => setStatus('Security setup failed without retaining the supplied secrets.'),
+                (error: unknown) =>
+                  setStatus(
+                    `Security setup failed — ${error instanceof Error ? error.message : String(error)} No supplied secret was retained.`,
+                  ),
               );
             }}
           >
             Create recovery and backup
           </button>
+          <p className="alert-settings__status" aria-live="polite" role="status">
+            {status}
+          </p>
           {generatedRecoveryKey ? (
             <output className="recovery-key">
               <strong>Recovery key—store this outside AckWatch</strong>
@@ -629,13 +648,27 @@ function CryptoSecurityPanel({
               const submitted = recoveryInput;
               setRecoveryInput('');
               void controller?.restoreCryptoSecurity(submitted).then(
-                () => setStatus('Recovery key accepted; crypto status refreshed.'),
-                () => setStatus('Recovery failed; the key was cleared from this form.'),
+                (imported) =>
+                  setStatus(
+                    imported > 0
+                      ? `Recovery key accepted; ${imported} room key${imported === 1 ? '' : 's'} restored from your key backup. Open an item that was waiting for keys to see it decrypted.`
+                      : 'Recovery key accepted, but no room keys came back from the key backup. Check that key storage is switched on in another of your Matrix clients.',
+                  ),
+                // What actually went wrong, not that something did. "No default secret-storage
+                // key" and "malformed recovery key" need entirely different responses, and the
+                // key is cleared from the form either way.
+                (error: unknown) =>
+                  setStatus(
+                    `Recovery failed — ${error instanceof Error ? error.message : String(error)} The key was cleared from this form.`,
+                  ),
               );
             }}
           >
             Restore security secrets
           </button>
+          <p className="alert-settings__status" aria-live="polite" role="status">
+            {status}
+          </p>
         </details>
         <div className="detail-actions">
           {snapshot.crypto.verification === 'requested' && snapshot.crypto.verificationIncoming ? (
@@ -707,7 +740,8 @@ function CryptoSecurityPanel({
             </div>
           </div>
         ) : null}
-        <p aria-live="polite">{status || snapshot.crypto.detail}</p>
+        {/* Only the fault detail here now; each action reports beside itself. */}
+        <p aria-live="polite">{snapshot.crypto.detail}</p>
       </div>
     </section>
   );
@@ -859,6 +893,20 @@ const QueueCard = memo(function QueueCard({
             title="Addressed to you by name, or in a room of two"
           >
             Direct
+          </span>
+        ) : null}
+        {/*
+          Whether the room encrypted this. Once keys arrive a decrypted message reads exactly like
+          a plaintext one, so without saying so there is no way to tell what protected it. The
+          badge describes the room, not this device: the preview is stored here in the clear either
+          way, which the instructions say plainly rather than letting the label imply otherwise.
+        */}
+        {item.encrypted === true ? (
+          <span
+            className="queue-card__encrypted"
+            title="This room is end-to-end encrypted. AckWatch still stores its preview unencrypted on this device."
+          >
+            Encrypted
           </span>
         ) : null}
         <span>{latest?.roomName ?? item.roomId}</span>
@@ -1737,6 +1785,10 @@ export function App({ controller, snapshot: suppliedSnapshot, view = signedOutVi
   const openItems = snapshot.queueItems
     .filter((item) => item.status !== 'COMPLETED' && !item.needsAttention)
     .sort(compareByOldestAcknowledged);
+  const needingAttention = attentionItems.length;
+  useEffect(() => {
+    document.title = documentTitleFor(needingAttention);
+  }, [needingAttention]);
   const completedItems = snapshot.queueItems
     .filter((item) => item.status === 'COMPLETED')
     .sort(compareByMostRecentlyCompleted);

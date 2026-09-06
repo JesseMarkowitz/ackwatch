@@ -369,14 +369,41 @@ export class MatrixRuntime {
     return generated.encodedPrivateKey;
   }
 
-  public async restoreCryptoSecurity(recoveryKey: string): Promise<void> {
+  public async restoreCryptoSecurity(recoveryKey: string): Promise<number> {
     const crypto = this.requireCrypto();
     const status = await crypto.getSecretStorageStatus();
     if (!status.defaultKeyId) throw new Error('This account has no default secret-storage key.');
     this.secretStorageKeys.set(status.defaultKeyId, decodeRecoveryKey(recoveryKey));
     await crypto.bootstrapCrossSigning({});
+
+    // Reading secret storage is not the same as holding the key backup's decryption key. That key
+    // has to be lifted out of secret storage and into the crypto store before the backup counts as
+    // active or a single room key can be fetched — and this step was missing, which is why an
+    // account with key storage switched on reported cross-signing ready, secret storage ready, key
+    // backup "setup needed", and left every historical message on
+    // MEGOLM_UNKNOWN_INBOUND_SESSION_ID no matter how many times the recovery key was entered.
+    await crypto.loadSessionBackupPrivateKeyFromSecretStorage();
     await crypto.checkKeyBackupAndEnable();
+
+    // Importing the backup outright rather than leaving each session to be fetched when some
+    // message happens to need it: the queue is already full of placeholders whose events the
+    // client may no longer hold, and those are never asked for again.
+    let imported = 0;
+    try {
+      const result = await crypto.restoreKeyBackup();
+      imported = result.imported;
+    } catch (error: unknown) {
+      // Cross-signing and secret storage are already restored at this point, which is worth
+      // keeping even if the backup itself cannot be read.
+      this.setCryptoSnapshot({
+        ...this.cryptoSnapshot,
+        detail: `Secrets restored, but the key backup could not be read: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      });
+    }
     await this.refreshCryptoStatus();
+    return imported;
   }
 
   public async requestOwnDeviceVerification(): Promise<CryptoSnapshot> {

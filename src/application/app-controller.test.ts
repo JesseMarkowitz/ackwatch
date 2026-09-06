@@ -157,6 +157,7 @@ describe('AckWatchController', () => {
       provenance: 'live',
       contentState: 'clear',
       relationKind: 'independent',
+      encrypted: false,
       attention: 'requires_attention',
       addressing: 'ambient',
     });

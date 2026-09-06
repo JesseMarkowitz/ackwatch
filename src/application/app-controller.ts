@@ -8,6 +8,7 @@ import { systemClock, type Clock } from '../domain/clock';
 import { CoverageMachine, type CoverageSnapshot } from '../domain/coverage';
 import {
   DeveloperLedger,
+  PREVIEW_CHARACTER_LIMIT,
   type IngestionDecision,
   type IngestionIssue,
   type NormalizationResult,
@@ -52,6 +53,13 @@ export type AppPhase =
 export interface AppSnapshot {
   readonly phase: AppPhase;
   readonly accountLabel: string;
+  /**
+   * The Matrix device this sign-in created. Another client lists sessions by this id, and a
+   * session-only sign-in makes a new one every time — so without it there is no way to tell which
+   * of several AckWatch sessions is the one in front of you, which is exactly what verification
+   * asks you to do.
+   */
+  readonly deviceLabel?: string | undefined;
   readonly homeserverLabel?: string;
   readonly preparedLogin?: PreparedLogin;
   readonly coverage: CoverageSnapshot;
@@ -105,7 +113,8 @@ export interface AckWatchControllerPort {
   resolveEventDetail(roomId: string, eventId: string): Promise<EventDetail>;
   loadItemActivities(itemId: string): Promise<readonly QueueActivity[]>;
   bootstrapCryptoSecurity(password: string, recoveryPassphrase?: string): Promise<string>;
-  restoreCryptoSecurity(recoveryKey: string): Promise<void>;
+  /** Resolves with the number of room keys imported from the backup. */
+  restoreCryptoSecurity(recoveryKey: string): Promise<number>;
   requestOwnDeviceVerification(): Promise<void>;
   acceptVerificationRequest(): Promise<void>;
   startSasVerification(): Promise<void>;
@@ -178,7 +187,12 @@ export interface WorkflowRepositoryPort extends AlertRepositoryPort {
   getSettings(accountId: string): Promise<AccountSettingsRecord>;
   putSettings(settings: AccountSettingsRecord): Promise<void>;
   exportSettings(accountId: string): Promise<string>;
-  diagnosticsReport(accountId: string, now: number): Promise<string>;
+  diagnosticsReport(
+    accountId: string,
+    now: number,
+    ignoredByReason?: Readonly<Record<string, number>>,
+  ): Promise<string>;
+  activity(accountId: string, eventId: string): Promise<QueueActivity | undefined>;
   pruneDiagnostics(accountId: string, now: number): Promise<number>;
   clearAccount(accountId: string): Promise<void>;
   importSettings(accountId: string, serialized: string): Promise<AccountSettingsRecord>;
@@ -194,7 +208,7 @@ export interface MatrixRuntimePort {
   retryCoverageIssues(): Promise<void>;
   resolveEventDetail?(roomId: string, eventId: string): Promise<EventDetail>;
   bootstrapCryptoSecurity?(password: string, recoveryPassphrase?: string): Promise<string>;
-  restoreCryptoSecurity?(recoveryKey: string): Promise<void>;
+  restoreCryptoSecurity?(recoveryKey: string): Promise<number>;
   requestOwnDeviceVerification?(): Promise<CryptoSnapshot>;
   acceptVerificationRequest?(): Promise<CryptoSnapshot>;
   startSasVerification?(): Promise<CryptoSnapshot>;
@@ -442,15 +456,43 @@ export class AckWatchController implements AckWatchControllerPort {
   }
 
   public async resolveEventDetail(roomId: string, eventId: string): Promise<EventDetail> {
-    return (
-      (await this.runtime?.resolveEventDetail?.(roomId, eventId)) ?? {
-        availability: 'unavailable',
-        roomId,
-        eventId,
-        reason: 'client_unavailable',
-        detail: 'Full detail is unavailable outside the active Matrix session.',
-      }
-    );
+    const detail = (await this.runtime?.resolveEventDetail?.(roomId, eventId)) ?? {
+      availability: 'unavailable' as const,
+      roomId,
+      eventId,
+      reason: 'client_unavailable' as const,
+      detail: 'Full detail is unavailable outside the active Matrix session.',
+    };
+
+    // Keys that arrive after a reload repair nothing on their own. A placeholder is repaired by the
+    // decryption event fired on the MatrixEvent that was being listened to when it was ingested,
+    // and a reload discards those listeners — so an item stored as "waiting for keys" stayed that
+    // way for ever, even once the keys were in hand. Opening it decrypts on demand; this writes
+    // that result back, so looking at the item is what mends it.
+    if (detail.availability === 'available' && detail.encrypted) {
+      await this.repairDecryptedActivity(detail);
+    }
+    return detail;
+  }
+
+  private async repairDecryptedActivity(detail: EventDetail & { availability: 'available' }) {
+    const accountId = this.credentials?.accountId;
+    if (!accountId || !this.workflow) return;
+    const stored = await this.workflow.activity(accountId, detail.eventId);
+    // Only a placeholder is repaired. A clear activity already holds the preview the operator saw,
+    // and rewriting it from the live client would quietly replace a stored record with a fresh
+    // read of the room.
+    if (!stored || stored.contentState === 'clear') return;
+    const preview = Array.from(detail.body ?? '')
+      .slice(0, PREVIEW_CHARACTER_LIMIT)
+      .join('');
+    await this.workflow.applyMaintenance(accountId, detail.eventId, {
+      kind: 'enrich_decrypted_content',
+      preview: (detail.body ?? '').length > preview.length ? `${preview}…` : preview,
+      ...(detail.messageType === undefined ? {} : { messageType: detail.messageType }),
+      ...(detail.media === undefined ? {} : { media: detail.media }),
+    });
+    await this.refreshWorkflow();
   }
 
   public async bootstrapCryptoSecurity(
@@ -461,9 +503,13 @@ export class AckWatchController implements AckWatchControllerPort {
     return await this.runtime.bootstrapCryptoSecurity(password, recoveryPassphrase);
   }
 
-  public async restoreCryptoSecurity(recoveryKey: string): Promise<void> {
+  public async restoreCryptoSecurity(recoveryKey: string): Promise<number> {
     if (!this.runtime?.restoreCryptoSecurity) throw new Error('Crypto is not available.');
-    await this.runtime.restoreCryptoSecurity(recoveryKey);
+    const imported = await this.runtime.restoreCryptoSecurity(recoveryKey);
+    // Keys that just arrived can decrypt placeholders already in the queue, and the projection is
+    // what the board reads.
+    await this.refreshWorkflow();
+    return imported;
   }
 
   public async requestOwnDeviceVerification(): Promise<void> {
@@ -656,6 +702,7 @@ export class AckWatchController implements AckWatchControllerPort {
           : { decryptionFailureCode: result.decryptionFailureCode }),
         ...(result.media === undefined ? {} : { media: result.media }),
         relationKind: result.relationKind,
+        encrypted: result.encrypted,
         attention: result.attention,
         addressing: result.addressing,
         ...(result.relationEventId === undefined
@@ -802,7 +849,11 @@ export class AckWatchController implements AckWatchControllerPort {
   public async exportDiagnostics(): Promise<string | undefined> {
     const accountId = this.credentials?.accountId;
     if (!accountId || !this.workflow) return undefined;
-    return await this.workflow.diagnosticsReport(accountId, this.clock.now());
+    return await this.workflow.diagnosticsReport(
+      accountId,
+      this.clock.now(),
+      this.ledger.snapshot().ignoreCounts,
+    );
   }
 
   /**
@@ -871,6 +922,9 @@ export class AckWatchController implements AckWatchControllerPort {
     return {
       phase: this.phase,
       accountLabel: this.credentials?.userId ?? this.preparedLogin?.userId ?? 'Not signed in',
+      ...(this.credentials?.deviceId === undefined
+        ? {}
+        : { deviceLabel: this.credentials.deviceId }),
       ...(homeserverLabel === undefined ? {} : { homeserverLabel }),
       ...(this.preparedLogin === undefined ? {} : { preparedLogin: this.preparedLogin }),
       coverage: this.coverage.snapshot(),

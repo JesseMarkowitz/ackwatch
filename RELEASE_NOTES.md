@@ -1,6 +1,6 @@
 # Release notes
 
-## 0.3.0 — V1 release candidate
+## 0.4.0 — V1 release candidate
 
 AckWatch is a local-first attention monitor for Matrix. It watches the rooms you supervise during a
 working session, turns activity that needs a response into a queue item, and keeps that item visible
@@ -26,6 +26,14 @@ AckWatch server, no account, and no telemetry.
 - **Reactions count as responses.** A reaction from someone else becomes activity on the
   conversation and alerts like a message, including a reaction to something you wrote. Your own
   reactions and messages are kept in an item's history and never alert.
+- **Pictures say they are pictures.** An image posted with no words reads as `Picture: filename`
+  rather than as a bare filename, files as `File`, and stickers — which are a separate event type
+  carrying no message type — are ingested rather than dismissed as unsupported.
+- **The browser tab counts what needs attention.** `(3) AckWatch` while three items are unlooked
+  at, so a tab in the background still says whether anything is waiting.
+- **Encrypted rooms are labelled.** A decrypted message is indistinguishable from a plaintext one,
+  so cards from end-to-end encrypted rooms say so. The label describes the room; the preview is
+  stored unencrypted on the device either way.
 - **Requests addressed to you are labelled.** A message naming you, or arriving in a room of two, is
   marked Direct. It is a label only: ordering, deadlines and escalation are unchanged.
 - **An alert tone you can replace.** The bundled sound is a short rising figure, inlined so nothing

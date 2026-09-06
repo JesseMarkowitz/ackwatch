@@ -61,6 +61,11 @@ export interface QueueItem {
    * from three; it is only easier to lose among them (EVT-012).
    */
   readonly direct?: boolean | undefined;
+  /**
+   * Whether this conversation is end-to-end encrypted. Presentation only, like `direct`, and worth
+   * showing because after decryption an encrypted message is indistinguishable from a plain one.
+   */
+  readonly encrypted?: boolean | undefined;
 }
 
 export interface QueueActivity {
@@ -84,6 +89,8 @@ export interface QueueActivity {
   readonly relationKind: 'independent' | 'thread' | 'reply' | 'reaction';
   readonly relationEventId?: string | undefined;
   readonly roomName?: string | undefined;
+  /** Whether the room encrypted this event end to end. See `SupportedActivity['encrypted']`. */
+  readonly encrypted: boolean;
   /** See `SupportedActivity['attention']`. `context_only` never becomes work. */
   readonly attention: 'requires_attention' | 'context_only';
   readonly addressing: 'direct' | 'ambient';

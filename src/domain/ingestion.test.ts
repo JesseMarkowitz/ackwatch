@@ -25,18 +25,97 @@ function envelope(overrides: Partial<IngestionEnvelope> = {}): IngestionEnvelope
 
 describe('normalization', () => {
   it.each([
-    ['m.text', 'hello'],
-    ['m.notice', 'notice'],
-    ['m.emote', 'waves'],
-    ['m.image', 'image.png'],
-    ['m.file', 'report.pdf'],
-  ] as const)('accepts supported %s messages', (msgtype, body) => {
+    ['m.text', 'hello', 'hello'],
+    ['m.notice', 'notice', 'notice'],
+    ['m.emote', 'waves', 'waves'],
+    // An attachment's body is its filename, not a message, so the preview says what arrived.
+    ['m.image', 'image.png', 'Picture: image.png'],
+    ['m.file', 'report.pdf', 'File: report.pdf'],
+  ] as const)('accepts supported %s messages', (msgtype, body, preview) => {
     const result = normalizeEnvelope(
       envelope({ event: { ...envelope().event, content: { msgtype, body } } }),
       '@monitor:example.test',
     );
 
-    expect(result).toMatchObject({ kind: 'activity', messageType: msgtype, preview: body });
+    expect(result).toMatchObject({ kind: 'activity', messageType: msgtype, preview });
+  });
+
+  /*
+   * Reported from real use: a picture posted with no words did not read as a picture. A client may
+   * send an image with its filename as the body, with an empty body, or with no body at all, and
+   * the first of those rendered as though the filename were the message while the others said
+   * nothing. All three now name what arrived, and none of them is ignored.
+   */
+  it.each([
+    [{ msgtype: 'm.image', body: 'holiday.jpg' }, 'Picture: holiday.jpg'],
+    [{ msgtype: 'm.image', body: '' }, 'Picture'],
+    [{ msgtype: 'm.image' }, 'Picture'],
+    [{ msgtype: 'm.image', filename: 'scan.png', body: 'scan.png' }, 'Picture: scan.png'],
+  ])('describes a picture posted without words (%#)', (content, preview) => {
+    expect(
+      normalizeEnvelope(
+        envelope({ event: { ...envelope().event, content } }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({
+      kind: 'activity',
+      messageType: 'm.image',
+      attention: 'requires_attention',
+      preview,
+    });
+  });
+
+  /*
+   * The client normally decrypts before the timeline hands an event over, so by the time it is
+   * ingested an encrypted message looks exactly like a plaintext one — and once a placeholder is
+   * repaired it looks like one too. The wire type is the only thing that still remembers.
+   */
+  it('records that a room encrypted a message, however it arrived', () => {
+    const decryptedOnArrival = normalizeEnvelope(
+      envelope({
+        event: {
+          ...envelope().event,
+          type: 'm.room.message',
+          wireType: 'm.room.encrypted',
+          content: { msgtype: 'm.text', body: 'clear by the time we saw it' },
+        },
+      }),
+      '@monitor:example.test',
+    );
+    expect(decryptedOnArrival).toMatchObject({ kind: 'activity', encrypted: true });
+
+    const stillEncrypted = normalizeEnvelope(
+      envelope({ event: { ...envelope().event, type: 'm.room.encrypted', content: {} } }),
+      '@monitor:example.test',
+    );
+    expect(stillEncrypted).toMatchObject({ kind: 'activity', encrypted: true });
+
+    expect(normalizeEnvelope(envelope(), '@monitor:example.test')).toMatchObject({
+      kind: 'activity',
+      encrypted: false,
+    });
+  });
+
+  it('treats a sticker as the picture it is rather than an unsupported event', () => {
+    // Stickers are their own event type and carry no msgtype, so the message-type gate never saw
+    // them and they were dismissed as unsupported — a picture posted, and nothing said about it.
+    expect(
+      normalizeEnvelope(
+        envelope({
+          event: {
+            ...envelope().event,
+            type: 'm.sticker',
+            content: { body: 'thumbsup', url: 'mxc://example.test/sticker' },
+          },
+        }),
+        '@monitor:example.test',
+      ),
+    ).toMatchObject({
+      kind: 'activity',
+      messageType: 'm.sticker',
+      preview: 'Sticker: thumbsup',
+      attention: 'requires_attention',
+    });
   });
 
   it('rejects cache/backfill and stopped-window activity intentionally', () => {

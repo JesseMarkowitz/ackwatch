@@ -1791,3 +1791,24 @@ button.is-active {
 .detail-activity-list__own strong {
   font-weight: 650;
 }
+
+/* The device id is compared character by character against a list in another client, so it is set
+   in the monospaced face and allowed to break rather than being truncated. */
+.crypto-status__device {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  overflow-wrap: anywhere;
+}
+
+/* End-to-end encrypted rooms. Deliberately quieter than the Direct label: it describes how the
+   message travelled, which is context, not a call to act. */
+.queue-card__encrypted {
+  padding: 0.08rem 0.4rem;
+  border: 1px solid rgba(21, 61, 57, 0.35);
+  border-radius: 999px;
+  color: var(--forest);
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}

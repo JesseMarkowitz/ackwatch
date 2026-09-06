@@ -116,7 +116,7 @@ const queueItem = (
 
 // Marked direct so the label that distinguishes a request addressed to the operator appears in a
 // baseline rather than only in the code that draws it.
-const attentionItem = { ...queueItem('attention', 'NEW'), direct: true };
+const attentionItem = { ...queueItem('attention', 'NEW'), direct: true, encrypted: true };
 const openItem = queueItem('open', 'ACKNOWLEDGED', 'Waiting on the maintenance window owner.');
 const completedItem = queueItem(
   'completed',
@@ -182,6 +182,7 @@ const fixtures = {
         provenance: 'live',
         contentState: 'clear',
         relationKind: 'independent',
+        encrypted: false,
         attention: 'requires_attention',
         addressing: 'ambient',
       },
@@ -329,6 +330,7 @@ const conversationActivities: readonly QueueActivity[] = [
     edited: false,
     redacted: false,
     relationKind: 'independent',
+    encrypted: true,
     attention: 'requires_attention',
     addressing: 'direct',
   },
@@ -351,6 +353,7 @@ const conversationActivities: readonly QueueActivity[] = [
     redacted: false,
     relationKind: 'thread',
     relationEventId: '$attention',
+    encrypted: true,
     attention: 'context_only',
     addressing: 'ambient',
   },
@@ -373,6 +376,7 @@ const conversationActivities: readonly QueueActivity[] = [
     redacted: false,
     relationKind: 'reaction',
     relationEventId: '$attention',
+    encrypted: false,
     attention: 'requires_attention',
     addressing: 'ambient',
   },

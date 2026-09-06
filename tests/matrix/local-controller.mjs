@@ -84,14 +84,22 @@ async function waitFor(description, predicate, timeoutMs = 30_000) {
   );
 }
 
-async function matrixRequest(path, { method = 'GET', token, body } = {}) {
+// A 1x1 transparent PNG, for asserting that a picture with no words becomes work.
+const PNG_BYTES = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+async function matrixRequest(path, { method = 'GET', token, body, contentType } = {}) {
+  // `contentType` sends the body as given rather than as JSON, which media upload requires.
+  const raw = contentType !== undefined;
   const response = await fetch(`${homeserverUrl}${path}`, {
     method,
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(body === undefined ? {} : { 'Content-Type': contentType ?? 'application/json' }),
     },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    ...(body === undefined ? {} : { body: raw ? body : JSON.stringify(body) }),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -566,6 +574,30 @@ async function main() {
     throw new Error("The operator's own reaction became work.");
   }
   manifest.assertions.push('own-reaction-creates-no-work');
+
+  // Reported from real use: a picture posted with no words did not alert. The domain accepted it in
+  // every shape when tested directly, so this asserts the whole path against a real homeserver —
+  // upload, send, ingest, card — rather than the part that was never in doubt.
+  const upload = await matrixRequest('/_matrix/media/v3/upload?filename=synthetic.png', {
+    method: 'POST',
+    token: senderB.access_token,
+    body: PNG_BYTES,
+    contentType: 'image/png',
+  });
+  const picture = await sendMessage(room.room_id, senderB.access_token, 'picture', {
+    msgtype: 'm.image',
+    // The filename as the body, which is what a client sends when the sender typed nothing.
+    body: 'synthetic.png',
+    url: upload.content_uri,
+    info: { mimetype: 'image/png', w: 1, h: 1, size: PNG_BYTES.length },
+  });
+  manifest.eventIds.picture = picture.event_id;
+  const pictureCard = page.locator(`[data-event-id="${picture.event_id}"]`);
+  await pictureCard.waitFor({ timeout: 30_000 });
+  await pictureCard.getByText('Picture: synthetic.png').waitFor();
+  await pictureCard.getByText('Needs attention', { exact: true }).waitFor();
+  await page.screenshot({ path: resolve(artifactsDirectory, 'real-picture.png'), fullPage: true });
+  manifest.assertions.push('picture-without-text-becomes-work-and-says-it-is-a-picture');
 
   // EVT-012: a message naming the operator is labelled, and ordering is untouched by it.
   const mention = await sendMessage(room.room_id, senderB.access_token, 'mention', {

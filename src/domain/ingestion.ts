@@ -45,7 +45,14 @@ export interface SupportedActivity {
   readonly sender: string;
   readonly eventType: string;
   readonly messageType:
-    'm.text' | 'm.notice' | 'm.emote' | 'm.image' | 'm.file' | 'm.encrypted' | 'm.reaction';
+    | 'm.text'
+    | 'm.notice'
+    | 'm.emote'
+    | 'm.image'
+    | 'm.file'
+    | 'm.encrypted'
+    | 'm.reaction'
+    | 'm.sticker';
   readonly preview: string;
   readonly detectedAt: number;
   readonly localSequence: number;
@@ -64,6 +71,15 @@ export interface SupportedActivity {
    * messages and their own reactions are the whole of it — being alerted about your own words is
    * absurd, but so is a history that shows one side of a conversation you took part in (EVT-011).
    */
+  /**
+   * Whether the room encrypted this event end to end.
+   *
+   * Taken from the wire type as well as the event type, because the client usually decrypts before
+   * the timeline hands the event over — so by the time it is ingested it looks exactly like a
+   * plaintext message, and once a placeholder is repaired it looks like one too. Without recording
+   * it at intake the distinction is gone for good.
+   */
+  readonly encrypted: boolean;
   readonly attention: 'requires_attention' | 'context_only';
   /**
    * Whether the activity was addressed to the operator — it names them, or the room holds only the
@@ -346,6 +362,7 @@ export function normalizeEnvelope(
   // (EVT-011), so it flows on as `context_only` and is filtered by disposition, not by discarding.
   const attention: SupportedActivity['attention'] =
     event.sender === ownUserId ? 'context_only' : 'requires_attention';
+  const encrypted = event.type === 'm.room.encrypted' || event.wireType === 'm.room.encrypted';
   const addressing = addressingOf(content, ownUserId, envelope.directRoom);
 
   // A reaction is an annotation on another event. Someone else reacting to a message — including
@@ -370,6 +387,7 @@ export function normalizeEnvelope(
       contentState: 'clear',
       relationKind: 'reaction',
       relationEventId: relatesTo.event_id,
+      encrypted,
       attention,
       addressing,
       ...(envelope.roomName === undefined ? {} : { roomName: envelope.roomName }),
@@ -396,6 +414,32 @@ export function normalizeEnvelope(
       contentState: failed ? 'unavailable' : 'encrypted_placeholder',
       ...(failed ? { decryptionFailureCode: event.decryptionFailureCode } : {}),
       ...relation,
+      encrypted,
+      attention,
+      addressing,
+      ...(envelope.roomName === undefined ? {} : { roomName: envelope.roomName }),
+    };
+  }
+
+  // A sticker is a picture posted as its own event type rather than as a message, so it carries no
+  // msgtype and would otherwise be dismissed as an unsupported event. It is a post like any other.
+  if (event.type === 'm.sticker') {
+    const stickerName = boundedPreview(content.body);
+    return {
+      kind: 'activity',
+      accountId: envelope.accountId,
+      eventId: event.eventId,
+      roomId: event.roomId,
+      sender: event.sender,
+      eventType: 'm.sticker',
+      messageType: 'm.sticker',
+      preview: stickerName ? `Sticker: ${stickerName}` : 'Sticker',
+      detectedAt: envelope.detectedAt,
+      localSequence: envelope.localSequence,
+      provenance: envelope.provenance,
+      contentState: 'clear',
+      ...relationOf(relatesTo),
+      encrypted,
       attention,
       addressing,
       ...(envelope.roomName === undefined ? {} : { roomName: envelope.roomName }),
@@ -411,10 +455,20 @@ export function normalizeEnvelope(
     return { kind: 'ignored', reason: 'unsupported_message_type', eventId: event.eventId };
   }
 
+  // A picture posted with no words has a body that is a filename, or nothing at all, and either
+  // read on a card as though it were the message. The preview says what arrived first, so a post
+  // that is only an image is recognisable as one without opening it.
+  const attachmentName = boundedPreview(content.filename ?? content.body);
   const preview =
-    messageType === 'm.image' || messageType === 'm.file'
-      ? boundedPreview(content.filename ?? content.body) || 'Attachment'
-      : boundedPreview(content.body);
+    messageType === 'm.image'
+      ? attachmentName
+        ? `Picture: ${attachmentName}`
+        : 'Picture'
+      : messageType === 'm.file'
+        ? attachmentName
+          ? `File: ${attachmentName}`
+          : 'File'
+        : boundedPreview(content.body);
   const media = mediaMetadata(content);
   const relation = relationOf(relatesTo);
 
@@ -433,6 +487,7 @@ export function normalizeEnvelope(
     contentState: 'clear',
     ...(media === undefined ? {} : { media }),
     ...relation,
+    encrypted,
     attention,
     addressing,
     ...(envelope.roomName === undefined ? {} : { roomName: envelope.roomName }),

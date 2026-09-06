@@ -65,8 +65,9 @@ const queueItemSchema: z.ZodType<QueueItem> = z.object({
   completedAt: z.number().int().nonnegative().optional(),
   reopenedCount: z.number().int().nonnegative(),
   deadline: deadlineSchema.optional(),
-  // Presentation only, and absent on items stored before addressing was observed.
+  // Presentation only, and absent on items stored before these were observed.
   direct: z.boolean().optional(),
+  encrypted: z.boolean().optional(),
 });
 const activitySchema: z.ZodType<QueueActivity> = z.object({
   id: z.string().min(1),
@@ -106,6 +107,9 @@ const activitySchema: z.ZodType<QueueActivity> = z.object({
   // Absent on records written before self-authored activity was retained. Everything stored then
   // was someone else's, because the operator's own events never reached the store, and nothing
   // observed addressing — so these defaults describe those records correctly rather than guessing.
+  // Absent on records written before the flag existed. `false` is the honest default: those
+  // records cannot say, and claiming encryption that was never observed is the worse error.
+  encrypted: z.boolean().catch(false),
   attention: z.enum(['requires_attention', 'context_only']).catch('requires_attention'),
   addressing: z.enum(['direct', 'ambient']).catch('ambient'),
   roomName: z.string().optional(),
@@ -247,6 +251,7 @@ export interface AcceptedActivityInput {
   readonly decryptionFailureCode?: string;
   readonly media?: QueueActivity['media'];
   readonly relationKind?: QueueActivity['relationKind'];
+  readonly encrypted?: QueueActivity['encrypted'];
   readonly attention?: QueueActivity['attention'];
   readonly addressing?: QueueActivity['addressing'];
   readonly relationEventId?: string;
@@ -441,7 +446,27 @@ export class WorkflowRepository {
           let itemRecord: QueueItem | undefined;
           let activeKey = eventKey;
 
-          if (rootEventId) {
+          // A reaction joins whatever item already holds the message it annotates, found through
+          // the message itself rather than through a key derived from it. Keying by the annotated
+          // event alone was right only for a message that is its own conversation: a message
+          // inside a thread belongs to an item keyed by the thread root, so the derived key missed
+          // and the reaction opened a second item for a conversation already being tracked.
+          if (input.relationKind === 'reaction' && input.relationEventId) {
+            const annotated = await this.database.activities.get(
+              recordId(input.accountId, input.relationEventId),
+            );
+            const annotatedItem = annotated
+              ? await this.database.queueItems.get(annotated.itemId)
+              : undefined;
+            if (annotatedItem) {
+              itemRecord = annotatedItem;
+              activeKey = annotatedItem.conversationKey;
+            }
+          }
+
+          if (itemRecord) {
+            // Already resolved through the annotated message.
+          } else if (rootEventId) {
             const rootKey = conversationKeyFor(input.roomId, rootEventId);
             const rootConversation = await this.database.conversationKeys.get(
               recordId(input.accountId, rootKey),
@@ -505,6 +530,7 @@ export class WorkflowRepository {
             edited: false,
             redacted: false,
             relationKind: input.relationKind ?? 'independent',
+            encrypted: input.encrypted ?? false,
             attention: input.attention ?? 'requires_attention',
             addressing: input.addressing ?? 'ambient',
             ...(input.relationEventId === undefined
@@ -566,8 +592,9 @@ export class WorkflowRepository {
           // Sticky: an item that was ever addressed to the operator stays labelled, because the
           // request that named them does not stop having named them when ambient traffic follows.
           const direct = itemRecord?.direct === true || activity.addressing === 'direct';
+          const encrypted = itemRecord?.encrypted === true || activity.encrypted;
           await this.database.queueItems.put(
-            queueItemSchema.parse({ ...mutation.item, latestActivity, direct }),
+            queueItemSchema.parse({ ...mutation.item, latestActivity, direct, encrypted }),
           );
           this.inject(faultAfter, 'after_item');
 
@@ -1172,6 +1199,12 @@ export class WorkflowRepository {
     return imported;
   }
 
+  /** One stored activity by its Matrix event id, for callers repairing a single record. */
+  public async activity(accountId: string, eventId: string): Promise<QueueActivity | undefined> {
+    const raw = await this.database.activities.get(recordId(accountId, eventId));
+    return raw && raw.accountId === accountId ? activitySchema.parse(raw) : undefined;
+  }
+
   /** Targeted lookups for the dispatcher, which needs one effect and one item per delivery and
    * must not read the whole account to find them. */
   public async alertEffect(accountId: string, effectId: string): Promise<AlertEffect | undefined> {
@@ -1297,7 +1330,17 @@ export class WorkflowRepository {
    * timings only: no previews, room IDs, event IDs, senders, user IDs, tokens or endpoints, so it
    * can be attached to a bug report without leaking who the operator watches or what was said.
    */
-  public async diagnosticsReport(accountId: string, now: number): Promise<string> {
+  /**
+   * @param ignoredByReason Counts of events the domain declined to turn into work, from the live
+   * ingestion ledger. They are not stored, so these describe the current run rather than the
+   * account's history — but "why was that message never captured" is the first question anyone
+   * asks about a gap, and until now the report could not answer it at all.
+   */
+  public async diagnosticsReport(
+    accountId: string,
+    now: number,
+    ignoredByReason: Readonly<Record<string, number>> = {},
+  ): Promise<string> {
     const database = this.database;
     const tally = <T>(rows: readonly T[], key: (row: T) => string): Record<string, number> => {
       const counts: Record<string, number> = {};
@@ -1361,7 +1404,11 @@ export class WorkflowRepository {
             (delivery) => delivery.lastErrorCode ?? 'unknown',
           ),
         },
-        ingestion: { issuesByCode: tally(issues, (issue) => issue.code) },
+        ingestion: {
+          issuesByCode: tally(issues, (issue) => issue.code),
+          // Since this run started, not since the account was created.
+          ignoredThisRunByReason: ignoredByReason,
+        },
         coverage: {
           issues: coverage.length,
           issuesByStatus: tally(coverage, (issue) => issue.status),
